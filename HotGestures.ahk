@@ -3,11 +3,17 @@
  * @author Tebayaki
  * @date 2023/9/30
  * @version 1.0
+ github Tebayaki HotGestures
+  * Multi-monitor / mixed DPI fix by 4di-hello, 2026
  ***********************************************************************/
+; Farbe angepasst auf 0xE8EEF7 bei "penColor :=" | 0xE8EEF7  ; "pale steel blue"
+; Stiftdicke "1" angepasst bei DllCall("CreatePen", "int", 0, "int", 1, "int", penColor, "ptr")
+; Tooltip auskommentiert: "this.__drawingBoard.DrawTip(tip)"
+
 class HotGestures {
     __matchInfos := Map()
 
-    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xFE4F7F) {
+    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) { ;originalfarbe: 0xFE4F7F | 0xE8EEF7  ; "pale steel blue"
         this.MaxDistance := maxDistance
         this.MinTrackLength := minTrackLen
         this.__drawingBoard := HotGestures.DrawingBoard(penColor)
@@ -60,6 +66,7 @@ class HotGestures {
         MouseGetPos(&x, &y)
         this.__lastX := x
         this.__lastY := y
+        this.__scaledMinTrackLen := this.MinTrackLength * this.__GetMonitorDPI(x, y)
         this.__drawingBoard.MoveTo(x, y)
         this.__trackLen := 0
         this.__match := ""
@@ -75,7 +82,7 @@ class HotGestures {
 
     Stop() {
         this.__mouseHook := ""
-        if this.__trackLen >= this.MinTrackLength {
+        if this.__trackLen >= this.__scaledMinTrackLen {
             this.Result.Valid := true
             if this.__match {
                 this.Result.MatchedGesture := this.__match.Gesture
@@ -100,7 +107,7 @@ class HotGestures {
         this.__vectors.Push(newVector)
         this.__BuildMatrixes(newVector)
 
-        if this.__trackLen < this.MinTrackLength
+        if this.__trackLen < this.__scaledMinTrackLen
             this.__trackLen += Sqrt(vx * vx + vy * vy)
         else if this.__UpdateMatch() {
             tip := ""
@@ -114,7 +121,7 @@ class HotGestures {
                 else if comment == ""
                     tip := name
             }
-            this.__drawingBoard.DrawTip(tip)
+            ;this.__drawingBoard.DrawTip(tip)
         }
 
         this.__lastX := x
@@ -172,21 +179,26 @@ class HotGestures {
         __lastTipH := 0
 
         __New(penColor) {
-            super.__New("+LastFound +AlwaysOnTop +ToolWindow +E0x00000020 -Caption -DPIScale")
-            this.BackColor := 0
+			this.__vLeft   := SysGet(76)
+			this.__vTop    := SysGet(77)
+			this.__vWidth  := SysGet(78)
+			this.__vHeight := SysGet(79)
+
+			super.__New("+LastFound +AlwaysOnTop +ToolWindow +E0x00000020 -Caption -DPIScale")
+			this.BackColor := 0
             WinSetTransColor(0)
             this.SetFont("S30", "Microsoft YaHei")
 
             this.__dc := DllCall("GetDC", "ptr", this.Hwnd, "ptr")
-            this.__pen := DllCall("CreatePen", "int", 0, "int", 5, "int", penColor, "ptr")
+            this.__pen := DllCall("CreatePen", "int", 0, "int", 1, "int", penColor, "ptr")
             DllCall("SelectObject", "ptr", this.__dc, "ptr", this.__pen)
 
-            this.__tip := this.AddText("Background0 +E0x00080000 x0 y0 w" A_ScreenWidth " h" A_ScreenHeight - 1)
+			this.__tip := this.AddText("Background0 +E0x00080000 x0 y0 w" this.__vWidth " h" this.__vHeight - 1)
             WinSetTransColor("0 200", this.__tip)
 
             this.__tipDC := DllCall("GetDC", "ptr", this.__tip.Hwnd, "ptr")
             this.__tipMemDC := DllCall("CreateCompatibleDC", "ptr", this.__tipDC, "ptr")
-            tipBmp := DllCall("CreateCompatibleBitmap", "ptr", this.__tipDC, "int", A_ScreenWidth, "int", A_ScreenHeight, "ptr")
+            tipBmp := DllCall("CreateCompatibleBitmap", "ptr", this.__tipDC, "int", this.__vWidth, "int", this.__vHeight, "ptr")
             DllCall("SelectObject", "ptr", this.__tipMemDC, "ptr", tipBmp)
 
             this.__blackBrush := DllCall("GetStockObject", "int", 4, "ptr")
@@ -211,7 +223,7 @@ class HotGestures {
         Show() {
             this.Opt("AlwaysOnTop")
             ; A_ScreenHeight - 1 to avoid "do not disturb" mode
-            super.Show("NoActivate x0 y0 w" A_ScreenWidth " h" A_ScreenHeight - 1)
+            super.Show("NoActivate x" this.__vLeft " y" this.__vTop " w" this.__vWidth " h" this.__vHeight - 1)
         }
 
         Hide() {
@@ -221,9 +233,9 @@ class HotGestures {
             super.Hide()
         }
 
-        MoveTo(x, y) => DllCall("MoveToEx", "ptr", this.__dc, "int", x, "int", y, "ptr", 0)
+		MoveTo(x, y) => DllCall("MoveToEx", "ptr", this.__dc, "int", x - this.__vLeft, "int", y - this.__vTop, "ptr", 0)
 
-        DrawLineTo(x, y) => DllCall("LineTo", "ptr", this.__dc, "int", x, "int", y)
+        DrawLineTo(x, y) => DllCall("LineTo", "ptr", this.__dc, "int", x - this.__vLeft, "int", y - this.__vTop)
 
         DrawTip(text) {
             if text == "" {
@@ -298,6 +310,7 @@ class HotGestures {
         static VerifyVectorsArray(vectorsArr, &copy) {
             copy := []
             for v in vectorsArr {
+		
                 if v.Length != 2
                     return false
                 if !(v[1] is Integer) || !(v[2] is Integer)
@@ -365,5 +378,10 @@ class HotGestures {
         }
 
         Clear() => this.Length := 1
+    }
+	    __GetMonitorDPI(x, y) {
+        hMon := DllCall("MonitorFromPoint", "int64", x | (y << 32), "uint", 2, "ptr")
+        DllCall("Shcore.dll\GetDpiForMonitor", "ptr", hMon, "uint", 0, "uint*", &dpiX := 0, "uint*", &dpiY := 0)
+        return dpiX / 96
     }
 }

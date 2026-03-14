@@ -1,10 +1,12 @@
+;HotGestures_optimiert.ahk
+
 /************************************************************************
  * @description An Autohotkey library for creating and recognizing any custom mouse gestures.
  * @author Tebayaki
  * @date 2023/9/30
  * @version 1.0
- github Tebayaki HotGestures
-  * Multi-monitor / mixed DPI fix by 4di-hello, 2026
+ * github Tebayaki HotGestures
+ * Multi-monitor / mixed DPI fix by 4di-hello, 2026
  ***********************************************************************/
 ; Farbe angepasst auf 0xE8EEF7 bei "penColor :=" | 0xE8EEF7  ; "pale steel blue"
 ; Stiftdicke "1" angepasst bei DllCall("CreatePen", "int", 0, "int", 1, "int", penColor, "ptr")
@@ -13,7 +15,7 @@
 class HotGestures {
     __matchInfos := Map()
 
-    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) { ;originalfarbe: 0xFE4F7F | 0xE8EEF7  ; "pale steel blue"
+    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
         this.MaxDistance := maxDistance
         this.MinTrackLength := minTrackLen
         this.__drawingBoard := HotGestures.DrawingBoard(penColor)
@@ -75,7 +77,7 @@ class HotGestures {
             mi.Excluded := false
             mi.Matrix.Clear()
         }
-        this.Result := { Valid: false, Vectors: this.__vectors, MatchedGesture: "", Distance: "", Comment: "", }
+        this.Result := { Valid: false, Vectors: this.__vectors, MatchedGesture: "", Distance: "", Comment: "" }
         this.__mouseHook := HotGestures.MouseHook(this.__OnMouseMove.Bind(this))
         this.__drawingBoard.Show()
     }
@@ -94,6 +96,13 @@ class HotGestures {
     }
 
     __OnMouseMove(x, y) {
+        ; Physische Hook-Koordinaten → Logische Koordinaten
+        pt := Buffer(8, 0)
+        NumPut("int", x, pt, 0)
+        NumPut("int", y, pt, 4)
+        DllCall("PhysicalToLogicalPointForPerMonitorDPI", "ptr", 0, "ptr", pt)
+        x := NumGet(pt, 0, "int")
+        y := NumGet(pt, 4, "int")
         ; anti-shake
         x := (x + this.__lastX) // 2
         y := (y + this.__lastY) // 2
@@ -171,104 +180,114 @@ class HotGestures {
         }
     }
 
-    class DrawingBoard extends Gui {
-        __lastTipRect := 0
-        __lastTipX := 0
-        __lastTipY := 0
-        __lastTipW := 0
-        __lastTipH := 0
-
+    class DrawingBoard {
         __New(penColor) {
-			this.__vLeft   := SysGet(76)
-			this.__vTop    := SysGet(77)
-			this.__vWidth  := SysGet(78)
-			this.__vHeight := SysGet(79)
-
-			super.__New("+LastFound +AlwaysOnTop +ToolWindow +E0x00000020 -Caption -DPIScale")
-			this.BackColor := 0
-            WinSetTransColor(0)
-            this.SetFont("S30", "Microsoft YaHei")
-
-            this.__dc := DllCall("GetDC", "ptr", this.Hwnd, "ptr")
-            this.__pen := DllCall("CreatePen", "int", 0, "int", 1, "int", penColor, "ptr")
-            DllCall("SelectObject", "ptr", this.__dc, "ptr", this.__pen)
-
-			this.__tip := this.AddText("Background0 +E0x00080000 x0 y0 w" this.__vWidth " h" this.__vHeight - 1)
-            WinSetTransColor("0 200", this.__tip)
-
-            this.__tipDC := DllCall("GetDC", "ptr", this.__tip.Hwnd, "ptr")
-            this.__tipMemDC := DllCall("CreateCompatibleDC", "ptr", this.__tipDC, "ptr")
-            tipBmp := DllCall("CreateCompatibleBitmap", "ptr", this.__tipDC, "int", this.__vWidth, "int", this.__vHeight, "ptr")
-            DllCall("SelectObject", "ptr", this.__tipMemDC, "ptr", tipBmp)
-
-            this.__blackBrush := DllCall("GetStockObject", "int", 4, "ptr")
-            grayBrush := DllCall("GetStockObject", "int", 3, "ptr")
-            DllCall("SelectObject", "ptr", this.__tipMemDC, "ptr", grayBrush)
-
-            font := SendMessage(0x0031, 0, 0, this.__tip)
-            DllCall("SelectObject", "ptr", this.__tipMemDC, "ptr", font)
-            DllCall("SetBkMode", "ptr", this.__tipMemDC, "int", 1)
-            DllCall("SetTextColor", "ptr", this.__tipMemDC, "uint", 0xffffff)
-
-            DllCall("DeleteObject", "ptr", tipBmp)
+            this.__penColor := penColor
+            this.__panels   := Map()
+            this.__lastX    := 0
+            this.__lastY    := 0
+            this.__BuildPanels()
         }
 
-        __Delete() {
-            DllCall("DeleteObject", "ptr", this.__pen)
-            DllCall("DeleteDC", "ptr", this.__tipMemDC)
-            DllCall("ReleaseDC", "ptr", this.__tipDC)
-            DllCall("ReleaseDC", "ptr", this.__dc)
+        __Delete() => this.Destroy()
+
+        Destroy() {
+            for , p in this.__panels {
+                DllCall("DeleteObject", "ptr", p.pen)
+                DllCall("ReleaseDC",   "ptr", p.hwnd, "ptr", p.dc)
+                try p.gui.Destroy()
+            }
+            this.__panels := Map()
+        }
+
+        __BuildPanels() {
+            this.Destroy()
+            loop MonitorGetCount() {
+                MonitorGet(A_Index, &left, &top, &right, &bottom)
+                w := right  - left
+                h := bottom - top
+
+                g := Gui("+LastFound +AlwaysOnTop +ToolWindow +E0x00000020 -Caption -DPIScale")
+                g.BackColor := 0
+                WinSetTransColor(0, g)
+
+                hwnd := g.Hwnd
+                dc   := DllCall("GetDC",     "ptr", hwnd, "ptr")
+                pen  := DllCall("CreatePen", "int", 0, "int", 1, "int", this.__penColor, "ptr")
+                DllCall("SelectObject", "ptr", dc, "ptr", pen)
+
+                this.__panels[A_Index] := {
+                    gui:    g,
+                    hwnd:   hwnd,
+                    dc:     dc,
+                    pen:    pen,
+                    left:   left,
+                    top:    top,
+                    right:  right,
+                    bottom: bottom,
+                    w:      w,
+                    h:      h
+                }
+            }
+        }
+
+        __GetPanel(x, y) {
+            for , p in this.__panels
+                if (x >= p.left && x < p.right && y >= p.top && y < p.bottom)
+                    return p
+            ; Fallback: Panel mit kleinstem Abstand zur Mitte
+            best := ""
+            bestDist := 999999
+            for , p in this.__panels {
+                cx := p.left + p.w // 2
+                cy := p.top  + p.h // 2
+                d  := Abs(x - cx) + Abs(y - cy)
+                if (d < bestDist) {
+                    bestDist := d
+                    best := p
+                }
+            }
+            return best
         }
 
         Show() {
-            this.Opt("AlwaysOnTop")
-            ; A_ScreenHeight - 1 to avoid "do not disturb" mode
-            super.Show("NoActivate x" this.__vLeft " y" this.__vTop " w" this.__vWidth " h" this.__vHeight - 1)
+            this.__BuildPanels()
+            for , p in this.__panels
+                p.gui.Show("NoActivate x" p.left " y" p.top " w" p.w " h" (p.h - 1))
         }
 
         Hide() {
-            ; Built-in WinRedraw don't redraw immediately.
-            DllCall("RedrawWindow", "ptr", this.__tip.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x205)
-            DllCall("RedrawWindow", "ptr", this.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x105)
-            super.Hide()
+		   
+            for , p in this.__panels {
+                DllCall("RedrawWindow", "ptr", p.hwnd, "ptr", 0, "ptr", 0, "uint", 0x105)
+                p.gui.Hide()
+            }
         }
 
-		MoveTo(x, y) => DllCall("MoveToEx", "ptr", this.__dc, "int", x - this.__vLeft, "int", y - this.__vTop, "ptr", 0)
-
-        DrawLineTo(x, y) => DllCall("LineTo", "ptr", this.__dc, "int", x - this.__vLeft, "int", y - this.__vTop)
-
-        DrawTip(text) {
-            if text == "" {
-                DllCall("RedrawWindow", "ptr", this.__tip.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x105)
+        MoveTo(x, y) {
+            this.__lastX := x
+            this.__lastY := y
+            p := this.__GetPanel(x, y)
+            if (p = "")
                 return
-            }
-            ; calc text size
-            DllCall("GetTextExtentPoint32", "ptr", this.__tipMemDC, "str", text, "int", StrLen(text), "int64*", &size := 0)
-            w := (size & 0xffffffff) + 100
-            h := (size >> 32) + 10
-            NumPut("int", left := (A_ScreenWidth - w) // 2,
-                "int", top := 200,
-                "int", right := left + w,
-                "int", bottom := top + h,
-                rect := Buffer(16))
-            ; erase last tip rect
-            if w < this.__lastTipW {
-                DllCall("FillRect", "ptr", this.__tipMemDC, "ptr", this.__lastTipRect, "ptr", this.__blackBrush)
-                DllCall("RoundRect", "ptr", this.__tipMemDC, "int", left, "int", top, "int", right, "int", bottom, "int", 20, "int", 20)
-                DllCall("DrawTextW", "ptr", this.__tipMemDC, "str", text, "int", StrLen(text), "ptr", rect, "uint", 0x125)
-                DllCall("BitBlt", "ptr", this.__tipDC, "int", this.__lastTipX, "int", this.__lastTipY, "int", this.__lastTipW, "int", this.__lastTipH, "ptr", this.__tipMemDC, "int", this.__lastTipX, "int", this.__lastTipY, "uint", 0x00CC0020)
-            }
-            else {
-                NumPut("int", left, "int", top, "int", right, "int", bottom, rect)
-                DllCall("RoundRect", "ptr", this.__tipMemDC, "int", left, "int", top, "int", right, "int", bottom, "int", 20, "int", 20)
-                DllCall("DrawTextW", "ptr", this.__tipMemDC, "str", text, "int", StrLen(text), "ptr", rect, "uint", 0x125)
-                DllCall("BitBlt", "ptr", this.__tipDC, "int", left, "int", top, "int", w, "int", h, "ptr", this.__tipMemDC, "int", left, "int", top, "uint", 0x00CC0020)
-            }
-            this.__lastTipRect := rect
-            this.__lastTipX := left
-            this.__lastTipY := top
-            this.__lastTipW := w
-            this.__lastTipH := h
+	   
+            DllCall("MoveToEx", "ptr", p.dc, "int", x - p.left, "int", y - p.top, "ptr", 0)
+        }
+
+        DrawLineTo(x, y) {
+            p  := this.__GetPanel(x, y)
+            if (p = "")
+                return
+            lp := this.__GetPanel(this.__lastX, this.__lastY)
+            if (lp = "" || p.left != lp.left || p.top != lp.top)
+                DllCall("MoveToEx", "ptr", p.dc, "int", x - p.left, "int", y - p.top, "ptr", 0)
+            DllCall("LineTo", "ptr", p.dc, "int", x - p.left, "int", y - p.top)
+            this.__lastX := x
+            this.__lastY := y
+        }
+
+        ; DrawTip absichtlich leer – Tooltip deaktiviert
+        DrawTip(text) {
         }
     }
 
@@ -310,7 +329,7 @@ class HotGestures {
         static VerifyVectorsArray(vectorsArr, &copy) {
             copy := []
             for v in vectorsArr {
-		
+  
                 if v.Length != 2
                     return false
                 if !(v[1] is Integer) || !(v[2] is Integer)
@@ -379,7 +398,8 @@ class HotGestures {
 
         Clear() => this.Length := 1
     }
-	    __GetMonitorDPI(x, y) {
+
+    __GetMonitorDPI(x, y) {
         hMon := DllCall("MonitorFromPoint", "int64", x | (y << 32), "uint", 2, "ptr")
         DllCall("Shcore.dll\GetDpiForMonitor", "ptr", hMon, "uint", 0, "uint*", &dpiX := 0, "uint*", &dpiY := 0)
         return dpiX / 96

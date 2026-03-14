@@ -1,407 +1,331 @@
-;HotGestures_optimiert.ahk
+#Include HotGestures.ahk
+GestureRecorder()
 
-/************************************************************************
- * @description An Autohotkey library for creating and recognizing any custom mouse gestures.
- * @author Tebayaki
- * @date 2023/9/30
- * @version 1.0
- * github Tebayaki HotGestures
- * Multi-monitor / mixed DPI fix by 4di-hello, 2026
- ***********************************************************************/
-; Farbe angepasst auf 0xE8EEF7 bei "penColor :=" | 0xE8EEF7  ; "pale steel blue"
-; Stiftdicke "1" angepasst bei DllCall("CreatePen", "int", 0, "int", 1, "int", penColor, "ptr")
-; Tooltip auskommentiert: "this.__drawingBoard.DrawTip(tip)"
+GestureRecorder() {
+    hgs := HotGestures()
+    testing := false
+    animation := ""
+    itemIndex := 1
+    maxDistance := 0.1
 
-class HotGestures {
-    __matchInfos := Map()
+    mainWindow := Gui(, "Gesture Recorder")
+    mainWindow.SetFont(, "Cascadia Code")
+    mainWindow.AddText(, "F2: edit name | Ctrl+C: copy vectors")
+    addBtn := mainWindow.AddButton("Section w120", "Add")
+    deleteBtn := mainWindow.AddButton("x+M wp", "Delete")
+    genCodeBtn := mainWindow.AddButton("x+M wp", "Generate Code")
+    testBtn := mainWindow.AddButton("x+M wp", "Test")
+    mainWindow.AddText("x+M wp hp-5 Center 0x200", "Max Distance:")
+    distanceEdit := mainWindow.AddEdit("x+M w100", "0.1")
+    listview := mainWindow.AddListView("-ReadOnly Center Grid xs w500 h500", ["Name", "Vectors"])
+    drawingBoard := mainWindow.AddText("BackgroundWhite Center w500 h500 x+M")
+    statusBar := mainWindow.AddStatusBar()
 
-    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
-        this.MaxDistance := maxDistance
-        this.MinTrackLength := minTrackLen
-        this.__drawingBoard := HotGestures.DrawingBoard(penColor)
+    listview.ModifyCol(1, 100)
+    mainWindow.OnEvent("Close", MainWindow_Close)
+    addBtn.OnEvent("Click", AddButton_Click)
+    deleteBtn.OnEvent("Click", DeleteBtn_Click)
+    genCodeBtn.OnEvent("Click", GenCodeBtn_Click)
+    testBtn.OnEvent("Click", TestBtn_Click)
+    drawingBoard.OnEvent("Click", DrawingBoard_Click)
+    listview.OnEvent("ItemFocus", ListView_ItemFocus)
+    ; listview.OnEvent("ItemSelect", ListView_ItemSelect)
+    OnMessage(0x0100, ListView_DeleteKeyDown)
+    OnMessage(0x0102, ListView_CtrlC)
+    mainWindow.Show()
+
+    InitDrawingBoard()
+    listview.Add(, "↑", "0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10|0,-10")
+    listview.Add(, "↓", "0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10|0,10")
+    listview.Add(, "←", "-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0|-10,0")
+    listview.Add(, "→", "10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0|10,0")
+    listview.Add(, "circle", "-20,0|-20,3|-19,5|-19,7|-18,10|-16,12|-15,14|-13,15|-11,17|-9,18|-6,19|-4,20|-1,20|1,20|4,20|6,19|9,18|11,17|13,15|15,14|16,12|18,10|19,7|19,5|20,3|20,0|20,-3|19,-5|19,-7|18,-10|16,-12|15,-14|13,-15|11,-17|9,-18|6,-19|4,-20|1,-20|-1,-20|-4,-20|-6,-19|-9,-18|-11,-17|-13,-15|-15,-14|-16,-12|-18,-10|-19,-7|-19,-5|-20,-3")
+    ControlFocus(listview)
+
+    MainWindow_Close(mainWindow) {
+        animation := ""
+        mainWindow.Destroy()
     }
 
-    __Delete() => this.__drawingBoard.Destroy()
+    AddButton_Click(ctrl, info) {
+        dialog := Gui("Owner" mainWindow.Hwnd, "Add a gesture")
+        dialog.SetFont(, "Cascadia Code")
+        dialog.AddText(, "Vectors:")
+        vectorsEdit := dialog.AddEdit("w400 r8")
+        okBtn := dialog.AddButton("w190", "OK")
+        cancelBtn := dialog.AddButton("wp x+M", "Cancel")
+        dialog.Show()
+        okBtn.OnEvent("Click", OkButton_Click)
+        cancelBtn.OnEvent("Click", (ctrl, info) => dialog.Destroy())
 
-    Register(gesture, comment, callback := "") {
-        matchInfo := { Gesture: gesture, Comment: comment, Callback: callback, Matrix: HotGestures.DistanceMatrix(gesture), Excluded: false }
-        this.__matchInfos.Set(gesture, matchInfo)
-    }
-
-    Unregister(gesture) => this.__matchInfos.Delete(gesture)
-
-    Clear() => this.__matchInfos.Clear()
-
-    Hotkey(keyName, options := "") {
-        keyName := GetKeyName(keyName)
-        if keyName == ""
-            throw Error("invalid key name")
-        sendIfNoMoved := !(keyName ~= "Control|Shift|Alt|Win")
-        Hotkey("$" keyName, OnHotkey, options)
-
-        OnHotkey(_) {
-            this.Start()
-            KeyWait(keyName)
-            this.Stop()
-            if this.Result.Valid {
-                if this.__match && this.__match.Callback is Func
-                    this.__match.Callback.Call(this.Result)
-            }
-            else if sendIfNoMoved {
-                Send("{" keyName "}")
-            }
+        OkButton_Click(ctrl, info) {
+            try
+                gesture := HotGestures.Gesture(Trim(vectorsEdit.Text, " `r`n`t"))
+            catch
+                MsgBox("Invalid vectors", "Warming")
+            else if AddGesture(gesture)
+                dialog.Destroy()
         }
     }
 
-    StartAndWait(keyName, &result) {
-        if GetKeyName(keyName) == ""
-            throw Error("invalid key name", , keyName)
-        this.Start()
-        KeyWait(keyName)
-        this.Stop()
-        result := this.Result
-        return this.Result.Valid
-    }
+    DeleteBtn_Click(ctrl, info) => DeleteSelections()
 
-    Start() {
-        CoordMode("Mouse", "Screen")
-        MouseGetPos(&x, &y)
-        this.__lastX := x
-        this.__lastY := y
-        this.__scaledMinTrackLen := this.MinTrackLength * this.__GetMonitorDPI(x, y)
-        this.__drawingBoard.MoveTo(x, y)
-        this.__trackLen := 0
-        this.__match := ""
-        this.__vectors := []
-        for , mi in this.__matchInfos {
-            mi.Excluded := false
-            mi.Matrix.Clear()
-        }
-        this.Result := { Valid: false, Vectors: this.__vectors, MatchedGesture: "", Distance: "", Comment: "" }
-        this.__mouseHook := HotGestures.MouseHook(this.__OnMouseMove.Bind(this))
-        this.__drawingBoard.Show()
-    }
-
-    Stop() {
-        this.__mouseHook := ""
-        if this.__trackLen >= this.__scaledMinTrackLen {
-            this.Result.Valid := true
-            if this.__match {
-                this.Result.MatchedGesture := this.__match.Gesture
-                this.Result.Distance := this.__match.Distance
-                this.Result.Comment := this.__match.Comment
-            }
-        }
-        this.__drawingBoard.Hide()
-    }
-
-    __OnMouseMove(x, y) {
-        ; Physische Hook-Koordinaten → Logische Koordinaten
-        pt := Buffer(8, 0)
-        NumPut("int", x, pt, 0)
-        NumPut("int", y, pt, 4)
-        DllCall("PhysicalToLogicalPointForPerMonitorDPI", "ptr", 0, "ptr", pt)
-        x := NumGet(pt, 0, "int")
-        y := NumGet(pt, 4, "int")
-        ; anti-shake
-        x := (x + this.__lastX) // 2
-        y := (y + this.__lastY) // 2
-        if x == this.__lastX && y == this.__lastY
+    GenCodeBtn_Click(ctrl, info) {
+        if CheckDistance(&distance) == ""
             return
-        this.__drawingBoard.DrawLineTo(x, y)
-
-        vx := x - this.__lastX
-        vy := y - this.__lastY
-        newVector := [vx, vy]
-        this.__vectors.Push(newVector)
-        this.__BuildMatrixes(newVector)
-
-        if this.__trackLen < this.__scaledMinTrackLen
-            this.__trackLen += Sqrt(vx * vx + vy * vy)
-        else if this.__UpdateMatch() {
-            tip := ""
-            if this.__match {
-                name := this.__match.Gesture.Name
-                comment := this.__match.Comment
-                if name != "" && comment != ""
-                    tip := name ": " comment
-                else if name == ""
-                    tip := comment
-                else if comment == ""
-                    tip := name
-            }
-            ;this.__drawingBoard.DrawTip(tip)
+        hgsVarName := "hgs"
+        part1 := part2 := part3 := ""
+        loop listview.GetCount() {
+            name := listview.GetText(A_Index, 1)
+            vectors := listview.GetText(A_Index, 2)
+            varName := "gesture" A_Index
+            part1 .= Format('{} := HotGestures.Gesture("{}")`n', varName, name ":" vectors)
+            part2 .= Format('{}.Register({}, "")`n', hgsVarName, varName)
+            part3 .= Format('case {}: `; {}`n            ', varName, name)
         }
-
-        this.__lastX := x
-        this.__lastY := y
+        part3 .= "default: return"
+        code := Format("
+        (
+            {1}
+            {2} := HotGestures({3})
+            {4}
+            $RButton::{
+                {2}.Start()
+                KeyWait("RButton")
+                {2}.Stop()
+                if {2}.Result.Valid {
+                    switch {2}.Result.MatchedGesture {
+                        {5}
+                    }
+                }
+                else {
+                    Send("{RButton}")
+                }
+            }
+        )", part1, hgsVarName, Format("{:g}", distance), part2, part3)
+        codeUi := Gui("+Owner" mainWindow.Hwnd, "Gesture code")
+        codeUi.SetFont(, "Cascadia Code")
+        codeUi.AddEdit("Multi HScroll w800 h500", code)
+        codeUi.Show()
     }
 
-    __BuildMatrixes(newVector) {
-        for , mi in this.__matchInfos
-            if !mi.Excluded
-                mi.Matrix.Append(newVector)
+    TestBtn_Click(ctrl, info) {
+        if testing {
+            hgs.Clear()
+            testBtn.Text := "Test"
+            statusBar.Text := ""
+            addBtn.Opt("-Disabled")
+            deleteBtn.Opt("-Disabled")
+            genCodeBtn.Opt("-Disabled")
+            distanceEdit.Opt("-Disabled")
+            testing := false
+        }
+        else {
+            if !CheckDistance(&distance)
+                return
+            hgs.MaxDistance := distance
+            loop listview.GetCount() {
+                name := listview.GetText(A_Index, 1)
+                vectors := listview.GetText(A_Index, 2)
+                gestrue := HotGestures.Gesture(name ":" vectors)
+                hgs.Register(gestrue, "")
+            }
+            animation := ""
+            InitDrawingBoard()
+            testBtn.Text := "Stop Test"
+            statusBar.Text := "Testing"
+            addBtn.Opt("Disabled")
+            deleteBtn.Opt("Disabled")
+            genCodeBtn.Opt("Disabled")
+            distanceEdit.Opt("Disabled")
+            testing := true
+        }
     }
 
-    __UpdateMatch() {
-        match := ""
-        minDist := this.MaxDistance
-        for , mi in this.__matchInfos {
-            distance := mi.Matrix.TraceBack()
-            if distance <= minDist {
-                mi.Distance := minDist := distance
-                match := mi
+    DrawingBoard_Click(ctrl, info) {
+        animation := ""
+        InitDrawingBoard("")
+        if hgs.StartAndWait("LButton", &result) {
+            if testing {
+                if result.MatchedGesture
+                    statusBar.Text := result.MatchedGesture.Name " matched, distance: " result.Distance
+                else
+                    statusBar.Text := "no match"
             }
-            else if distance > 1 {
-                mi.Excluded := true
+            else {
+                newGesture := HotGestures.Gesture("Unnamed" itemIndex++, result.Vectors)
+                AddGesture(newGesture)
             }
         }
-        if this.__match == match
-            return false
-        this.__match := match
+        else {
+            InitDrawingBoard()
+        }
+    }
+
+    ListView_CtrlC(wp, lp, msg, hwnd) {
+        if hwnd == listview.Hwnd && wp == 3 {
+            row := 0
+            str := ""
+            while row := listview.GetNext(row)
+                str .= listview.GetText(row, 1) ":" listview.GetText(row, 2) "`n"
+            if str != "" {
+                A_Clipboard := Trim(str)
+                statusBar.Text := "Copied!"
+            }
+        }
+    }
+
+    ListView_DeleteKeyDown(wp, lp, msg, hwnd) {
+        if hwnd == listview.Hwnd && wp == 0x2E
+            DeleteSelections()
+    }
+
+    ListView_ItemFocus(ctrl, item) {
+        ; if focus changed because of deleting a item, the item index passed in is incorrect.
+        if item := listview.GetNext(0, "Focused") {
+            name := listview.GetText(item, 1)
+            vectorsStr := listview.GetText(item, 2)
+            gesture := HotGestures.Gesture(name, vectorsStr)
+            animation := CreateAnimation(gesture)
+        }
+    }
+
+    AddGesture(newGesture) {
+        prompt := ""
+        for name, vectorsStr in GesturesEnumerator() {
+            d := newGesture.Compare(HotGestures.Gesture(name ":" vectorsStr))
+            if d <= maxDistance {
+                prompt .= "`n    Name: " name "`tDistance: " d
+            }
+        }
+        if prompt != "" {
+            mainWindow.Opt("OwnDialogs")
+            prompt := "This gesture is too similar to the following:" prompt "`n`nAre you sure to add it?"
+            if "No" = MsgBox(prompt, "Warming", 0x4)
+                return false
+        }
+        listview.Add("Vis Focus", newGesture.Name, newGesture.ToString())
+        animation := CreateAnimation(newGesture)
         return true
     }
 
-    class MouseHook {
-        __New(function) {
-            this.__proc := CallbackCreate(LowLevelMouseHookProc, "F")
-            this.__hook := DllCall("SetWindowsHookEx", "int", 14, "ptr", this.__proc, "ptr", 0, "uint", 0, "ptr")
-
-            LowLevelMouseHookProc(nCode, wParam, lParam) {
-                if nCode == 0 && wParam == 0x0200
-                    function(NumGet(lParam, "int"), NumGet(lParam, 4, "int"))
-                return DllCall("CallNextHookEx", "ptr", 0, "int", nCode, "ptr", wParam, "ptr", lParam)
-            }
-        }
-
-        __Delete() {
-            DllCall("UnhookWindowsHookEx", "ptr", this.__hook)
-            CallbackFree(this.__proc)
+    GesturesEnumerator() {
+        return enum
+        enum(&name, &vectors) {
+            if A_Index > listview.GetCount()
+                return false
+            name := listview.GetText(A_Index, 1)
+            vectors := listview.GetText(A_Index, 2)
         }
     }
 
-    class DrawingBoard {
-        __New(penColor) {
-            this.__penColor := penColor
-            this.__panels   := Map()
-            this.__lastX    := 0
-            this.__lastY    := 0
-            this.__BuildPanels()
+    CreateAnimation(gesture, interval := 20, repeatInterval := 1000) {
+        InitDrawingBoard("")
+        points := []
+        points.Capacity := gesture.Length
+        x := y := left := top := right := bottom := 0
+        for v in gesture {
+            points.Push([x += v[1], y += v[2]])
+            left := Min(x, left)
+            top := Min(y, top)
+            right := Max(x, right)
+            bottom := Max(y, bottom)
         }
+        w := right - left
+        h := bottom - top
 
-        __Delete() => this.Destroy()
+        dc := DllCall("GetDC", "ptr", drawingBoard.Hwnd, "ptr")
+        ; transform
+        drawingBoard.GetPos(, , &boardW, &boardH)
+        boardW *= A_ScreenDPI / 96
+        boardH *= A_ScreenDPI / 96
+        xform := Buffer(24)
+        scale := 1
+        if w > boardH - 5 || h > boardH - 5 {
+            scale := Min((boardW - 10) / w, (boardH - 10) / h)
+            w *= scale, h *= scale, left *= scale, top *= scale
+        }
+        NumPut("float", scale, "float", 0, "float", 0, "float", scale, "float", (boardW - w) / 2 - left, "float", (boardH - h) / 2 - top, xform)
+        DllCall("SetGraphicsMode", "ptr", dc, "int", 2)
+        DllCall("SetWorldTransform", "ptr", dc, "ptr", xform)
 
-        Destroy() {
-            for , p in this.__panels {
-                DllCall("DeleteObject", "ptr", p.pen)
-                DllCall("ReleaseDC",   "ptr", p.hwnd, "ptr", p.dc)
-                try p.gui.Destroy()
+        pen := DllCall("CreatePen", "int", 0, "int", 5, "uint", 0xFE4F7F, "ptr")
+        DllCall("SelectObject", "ptr", dc, "ptr", pen, "ptr")
+
+        index := 1
+        SetTimer(LineToNextPoint, interval)
+        return { __Delete: __Delete }
+
+        LineToNextPoint() {
+            if index == 0 {
+                InitDrawingBoard("")
+                DllCall("MoveToEx", "ptr", dc, "int", 0, "int", 0, "ptr", 0)
+                SetTimer(LineToNextPoint, interval)
+                index++
             }
-            this.__panels := Map()
-        }
-
-        __BuildPanels() {
-            this.Destroy()
-            loop MonitorGetCount() {
-                MonitorGet(A_Index, &left, &top, &right, &bottom)
-                w := right  - left
-                h := bottom - top
-
-                g := Gui("+LastFound +AlwaysOnTop +ToolWindow +E0x00000020 -Caption -DPIScale")
-                g.BackColor := 0
-                WinSetTransColor(0, g)
-
-                hwnd := g.Hwnd
-                dc   := DllCall("GetDC",     "ptr", hwnd, "ptr")
-                pen  := DllCall("CreatePen", "int", 0, "int", 1, "int", this.__penColor, "ptr")
-                DllCall("SelectObject", "ptr", dc, "ptr", pen)
-
-                this.__panels[A_Index] := {
-                    gui:    g,
-                    hwnd:   hwnd,
-                    dc:     dc,
-                    pen:    pen,
-                    left:   left,
-                    top:    top,
-                    right:  right,
-                    bottom: bottom,
-                    w:      w,
-                    h:      h
-                }
-            }
-        }
-
-        __GetPanel(x, y) {
-            for , p in this.__panels
-                if (x >= p.left && x < p.right && y >= p.top && y < p.bottom)
-                    return p
-            ; Fallback: Panel mit kleinstem Abstand zur Mitte
-            best := ""
-            bestDist := 999999
-            for , p in this.__panels {
-                cx := p.left + p.w // 2
-                cy := p.top  + p.h // 2
-                d  := Abs(x - cx) + Abs(y - cy)
-                if (d < bestDist) {
-                    bestDist := d
-                    best := p
-                }
-            }
-            return best
-        }
-
-        Show() {
-            this.__BuildPanels()
-            for , p in this.__panels
-                p.gui.Show("NoActivate x" p.left " y" p.top " w" p.w " h" (p.h - 1))
-        }
-
-        Hide() {
-		   
-            for , p in this.__panels {
-                DllCall("RedrawWindow", "ptr", p.hwnd, "ptr", 0, "ptr", 0, "uint", 0x105)
-                p.gui.Hide()
-            }
-        }
-
-        MoveTo(x, y) {
-            this.__lastX := x
-            this.__lastY := y
-            p := this.__GetPanel(x, y)
-            if (p = "")
-                return
-	   
-            DllCall("MoveToEx", "ptr", p.dc, "int", x - p.left, "int", y - p.top, "ptr", 0)
-        }
-
-        DrawLineTo(x, y) {
-            p  := this.__GetPanel(x, y)
-            if (p = "")
-                return
-            lp := this.__GetPanel(this.__lastX, this.__lastY)
-            if (lp = "" || p.left != lp.left || p.top != lp.top)
-                DllCall("MoveToEx", "ptr", p.dc, "int", x - p.left, "int", y - p.top, "ptr", 0)
-            DllCall("LineTo", "ptr", p.dc, "int", x - p.left, "int", y - p.top)
-            this.__lastX := x
-            this.__lastY := y
-        }
-
-        ; DrawTip absichtlich leer – Tooltip deaktiviert
-        DrawTip(text) {
-        }
-    }
-
-    class Gesture extends Array {
-        __New(name, vectors?) {
-            valid := false
-            if IsSet(vectors) {
-                if vectors is String {
-                    valid := HotGestures.Gesture.VerifyVectorsString(vectors, , &vectorsArr)
-                }
-                else if vectors is Array {
-                    valid := HotGestures.Gesture.VerifyVectorsArray(vectors, &vectorsArr)
-                }
+            if index <= points.Length {
+                DllCall("LineTo", "ptr", dc, "int", points[index][1], "int", points[index][2])
+                index++
             }
             else {
-                valid := HotGestures.Gesture.VerifyVectorsString(name, &name, &vectorsArr)
+                SetTimer(LineToNextPoint, -repeatInterval)
+                index := 0
             }
-            if !valid {
-                throw Error("invalid parameter(s)")
-            }
-            this.Name := name
-            super.__New(vectorsArr*)
         }
 
-        ToString() {
-            vectorsStr := ""
-            for v in this
-                vectorsStr .= (A_Index == 1 ? "" : "|") v[1] "," v[2]
-            return vectorsStr
-        }
-
-        Compare(vectors) {
-            matrix := HotGestures.DistanceMatrix(this)
-            for v in vectors
-                matrix.Append(v)
-            return matrix.TraceBack()
-        }
-
-        static VerifyVectorsArray(vectorsArr, &copy) {
-            copy := []
-            for v in vectorsArr {
-  
-                if v.Length != 2
-                    return false
-                if !(v[1] is Integer) || !(v[2] is Integer)
-                    return false
-                copy.Push([v[1], v[2]])
-            }
-            return true
-        }
-
-        static VerifyVectorsString(vectorsStr, &name?, &vectorsArr?) {
-            if res := RegExMatch(vectorsStr, "^(?:(.*):)?((?:-?\d+,-?\d+)(?:\|-?\d+,-?\d+)*)$", &m) {
-                name := m[1]
-                vectorsArr := []
-                loop parse m[2], "|" {
-                    v := StrSplit(A_LoopField, ",", , 2)
-                    vectorsArr.Push([Integer(v[1]), Integer(v[2])])
-                }
-            }
-            return !!res
+        __Delete(_) {
+            SetTimer(LineToNextPoint, 0)
+            DllCall("DeleteObject", "ptr", pen)
+            DllCall("ReleaseDC", "ptr", dc)
         }
     }
 
-    class DistanceMatrix extends Array {
-        __New(standard) {
-            static INF := NumGet(ObjPtr(&_ := 0x7F800000) + A_PtrSize * 2, "float")
-
-            if !len := standard.Length
-                throw Error("invalid parameter")
-
-            this.Standard := standard
-            this.Capacity := len + 1
-
-            this.RowTemplate := []
-            this.RowTemplate.Capacity := len + 1
-            this.RowTemplate.Push(INF)
-
-            this.Push(firstRow := this.RowTemplate.Clone())
-            firstRow[1] := 0
-            loop len
-                firstRow.Push(INF)
+    InitDrawingBoard(text?) {
+        text := text ?? "Draw gestures here with the left button"
+        dc := DllCall("GetDC", "ptr", drawingBoard.Hwnd, "ptr")
+        drawingBoard.GetPos(, , &boardW, &boardH)
+        boardW *= A_ScreenDPI / 96
+        boardH *= A_ScreenDPI / 96
+        DllCall("Rectangle", "ptr", dc, "int", 0, "int", 0, "int", boardW, "int", boardH)
+        if text {
+            rect := Buffer(16)
+            NumPut("int64", 0, "int", boardW, "int", boardH, rect)
+            font := SendMessage(0x0031, 0, 0, drawingBoard)
+            DllCall("SelectObject", "ptr", dc, "ptr", font, "ptr")
+            DllCall("DrawTextW", "ptr", dc, "str", text, "int", StrLen(text), "ptr", rect, "uint", 0x125)
         }
-
-        Append(newVector) {
-            static Distance(a, b) => 1 - (a[1] * b[1] + a[2] * b[2]) / (Sqrt(a[1] ** 2 + a[2] ** 2) * Sqrt(b[1] ** 2 + b[2] ** 2))
-
-            standard := this.Standard
-            lastRow := this[-1]
-
-            this.Push(newRow := this.RowTemplate.Clone())
-            loop standard.Length
-                newRow.Push(Distance(newVector, standard[A_Index]) + Min(newRow[A_Index], lastRow[A_Index], lastRow[A_Index + 1]))
-        }
-
-        TraceBack() {
-            i := this.Length - 1 , j := this[1].Length - 1 , count := 1
-            while i > 1 && j > 1 {
-                switch min(a := this[i][j], b := this[i][j + 1], this[i + 1][j]) {
-                    case a: i--, j--
-                    case b: i--
-                    default: j--
-                }
-                count++
-            }
-            return this[-1][-1] / (count + i + j - 2)
-        }
-
-        Clear() => this.Length := 1
+        DllCall("ReleaseDC", "ptr", dc)
     }
 
-    __GetMonitorDPI(x, y) {
-        hMon := DllCall("MonitorFromPoint", "int64", x | (y << 32), "uint", 2, "ptr")
-        DllCall("Shcore.dll\GetDpiForMonitor", "ptr", hMon, "uint", 0, "uint*", &dpiX := 0, "uint*", &dpiY := 0)
-        return dpiX / 96
+    DeleteSelections() {
+        if testing {
+            statusBar.Text := "Please stop test"
+        }
+        else {
+            row := 0
+            arr := []
+            while row := listview.GetNext(row)
+                arr.InsertAt(1, row)
+            else
+                return
+            animation := ""
+            for r in arr
+                listview.Delete(r)
+            statusBar.Text := arr.Length " items deleted"
+        }
+        if !listview.GetNext(0, "Focused") {
+            InitDrawingBoard()
+        }
+    }
+
+    CheckDistance(&distance) {
+        distanceStr := distanceEdit.Text
+        if IsNumber(distanceStr) {
+            distance := Number(distanceStr)
+            if distance >= 0 && distance <= 2
+                return true
+        }
+        statusBar.Text := "invalid distance"
+        return false
     }
 }

@@ -100,12 +100,9 @@ class HotGestures {
         pt := Buffer(8, 0)
         NumPut("int", x, pt, 0)
         NumPut("int", y, pt, 4)
-        DllCall("PhysicalToLogicalPointForPerMonitorDPI", "ptr", 0, "ptr", pt)
+        DllCall("PhysicalToLogicalPointForPerMonitorDPI", "ptr", DllCall("GetDesktopWindow", "ptr"), "ptr", pt)
         x := NumGet(pt, 0, "int")
         y := NumGet(pt, 4, "int")
-        ; anti-shake
-        x := (x + this.__lastX) // 2
-        y := (y + this.__lastY) // 2
         if x == this.__lastX && y == this.__lastY
             return
         this.__drawingBoard.DrawLineTo(x, y)
@@ -186,6 +183,7 @@ class HotGestures {
             this.__panels   := Map()
             this.__lastX    := 0
             this.__lastY    := 0
+            this.__lastHash := ""
             this.__BuildPanels()
         }
 
@@ -232,16 +230,12 @@ class HotGestures {
         }
 
         __GetPanel(x, y) {
-            for , p in this.__panels
-                if (x >= p.left && x < p.right && y >= p.top && y < p.bottom)
-                    return p
-            ; Fallback: Panel mit kleinstem Abstand zur Mitte
             best := ""
             bestDist := 999999
             for , p in this.__panels {
-                cx := p.left + p.w // 2
-                cy := p.top  + p.h // 2
-                d  := Abs(x - cx) + Abs(y - cy)
+                if (x >= p.left && x < p.right && y >= p.top && y < p.bottom)
+                    return p
+                d := Abs(x - (p.left + p.w // 2)) + Abs(y - (p.top + p.h // 2))
                 if (d < bestDist) {
                     bestDist := d
                     best := p
@@ -251,13 +245,25 @@ class HotGestures {
         }
 
         Show() {
-            this.__BuildPanels()
+            hash := this.__GetMonitorHash()
+            if (hash != this.__lastHash) {
+                this.__BuildPanels()
+                this.__lastHash := hash
+            }
             for , p in this.__panels
                 p.gui.Show("NoActivate x" p.left " y" p.top " w" p.w " h" (p.h - 1))
         }
 
+        __GetMonitorHash() {
+            h := ""
+            loop MonitorGetCount() {
+                MonitorGet(A_Index, &L, &T, &R, &B)
+                h .= L "," T "," R "," B "|"
+            }
+            return h
+        }
+
         Hide() {
-		   
             for , p in this.__panels {
                 DllCall("RedrawWindow", "ptr", p.hwnd, "ptr", 0, "ptr", 0, "uint", 0x105)
                 p.gui.Hide()
@@ -270,7 +276,6 @@ class HotGestures {
             p := this.__GetPanel(x, y)
             if (p = "")
                 return
-	   
             DllCall("MoveToEx", "ptr", p.dc, "int", x - p.left, "int", y - p.top, "ptr", 0)
         }
 
@@ -329,7 +334,6 @@ class HotGestures {
         static VerifyVectorsArray(vectorsArr, &copy) {
             copy := []
             for v in vectorsArr {
-  
                 if v.Length != 2
                     return false
                 if !(v[1] is Integer) || !(v[2] is Integer)
@@ -400,7 +404,14 @@ class HotGestures {
     }
 
     __GetMonitorDPI(x, y) {
-        hMon := DllCall("MonitorFromPoint", "int64", x | (y << 32), "uint", 2, "ptr")
+        ; Logische → physische Koordinaten für MonitorFromPoint
+        pt := Buffer(8, 0)
+        NumPut("int", x, pt, 0)
+        NumPut("int", y, pt, 4)
+        DllCall("LogicalToPhysicalPointForPerMonitorDPI", "ptr", DllCall("GetDesktopWindow", "ptr"), "ptr", pt)
+        px := NumGet(pt, 0, "int")
+        py := NumGet(pt, 4, "int")
+        hMon := DllCall("MonitorFromPoint", "int64", px | (py << 32), "uint", 2, "ptr")
         DllCall("Shcore.dll\GetDpiForMonitor", "ptr", hMon, "uint", 0, "uint*", &dpiX := 0, "uint*", &dpiY := 0)
         return dpiX / 96
     }

@@ -1,5 +1,5 @@
 /************************************************************************
- * HotGestures-NG — an AutoHotkey v2 library for custom mouse gestures.
+ * HotGestures-Continued — an AutoHotkey v2 library for custom mouse gestures.
  *
  * Fork and continuation of HotGestures by Tebayaki (2023), which appears
  * to be unmaintained. Upstream: https://github.com/Tebayaki/HotGestures

@@ -1,4 +1,4 @@
-# HotGestures-NG
+# HotGestures-Continued
 
 A light AutoHotkey **v2** library for creating and recognizing custom one-stroke
 mouse gestures. Define any pattern — lines, arcs, polylines, L, O, M, U, Z, even

@@ -5,7 +5,7 @@ All notable changes against the upstream project
 
 ## [0.9.0] — unreleased
 
-Everything below is new in HotGestures-NG. Upstream is unchanged since 2023 and
+Everything below is new in HotGestures-Continued. Upstream is unchanged since 2023 and
 appears to be unmaintained.
 
 ### Added

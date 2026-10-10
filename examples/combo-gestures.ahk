@@ -5,7 +5,7 @@
 ;  while a gesture is running, without paying for it on every
 ;  ordinary click.
 ;
-;  Part of HotGestures-NG. MIT licensed, see ../LICENSE.
+;  Part of HotGestures-Continued. MIT licensed, see ../LICENSE.
 ;  Provided "AS IS", without warranty of any kind.
 ;==========================================================
 

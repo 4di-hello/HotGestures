@@ -41,8 +41,13 @@ appears to be unmaintained.
   when monitors are added, removed, or rearranged, instead of silently drawing
   to stale coordinates.
 - **Coordinates from `MouseGetPos`** instead of the hook's raw `lParam`. The hook
-  is now only a trigger. This keeps everything in AHK's logical coordinate space
-  and removes a class of mixed-DPI offset bugs.
+  is now only a trigger. The hook reports *physical* pixels while the rest of
+  AHK v2 works in *logical* coordinates; on a monitor whose scaling differs from
+  the primary, the track was drawn on the wrong screen. An intermediate version
+  converted with `PhysicalToLogicalPointForPerMonitorDPI`; taking the position
+  from `MouseGetPos` avoids the conversion entirely.
+  Background: [forum thread](https://www.autohotkey.com/boards/viewtopic.php?f=82&t=140331),
+  [DPI scaling docs](https://www.autohotkey.com/docs/v2/misc/DPIScaling.htm).
 - **`__GetMonitorScale`** replaces `__GetMonitorDPI`, with `try`/`catch` around
   `LogicalToPhysicalPointForPerMonitorDPI`, `MonitorFromPoint` and
   `GetDpiForMonitor`, falling back to `1.0` rather than propagating a broken

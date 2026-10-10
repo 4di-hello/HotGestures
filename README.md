@@ -6,9 +6,10 @@ a star — and bind it to a function.
 
 ![demo](./pic/demo.gif)
 
-> **Status: v0.9, looking for feedback.** It has been in daily use on one
-> multi-monitor, mixed-DPI Windows 11 machine for months, but it has had exactly
-> one tester. Issues and pull requests are very welcome.
+> **Status: v0.9, looking for feedback.** In daily use for months on one
+> Windows 11 machine with three monitors — 2× 4K at 150 % and a FullHD laptop
+> screen at 100 % — but it has had exactly one tester. Issues and pull requests
+> are very welcome.
 
 ---
 
@@ -128,14 +129,56 @@ Left-slide:-10,0|-10,0|-10,0
 
 ---
 
+## The mixed-DPI problem, and why it is solved this way
+
+Upstream drew into a single overlay spanning the whole virtual desktop. That
+works as long as every monitor runs at the same scaling. Add one monitor at a
+different scale and the track lands on the wrong screen — in my case offset by
+exactly `-8640 / 1.5 = -5760` px.
+
+The root cause is a coordinate-system mismatch: the low-level mouse hook
+delivers **physical** pixels, while AutoHotkey v2 runs as *System DPI Aware* and
+uses **logical** coordinates everywhere else — `MonitorGet`, `Gui.Show`, GDI.
+On monitors sharing the primary monitor's DPI the two are identical, which is
+why the bug only appears once a differently scaled monitor joins.
+
+Two changes fix it:
+
+1. **One overlay window per monitor**, each with its own DC and pen, positioned
+   with plain `Gui.Show()` and `MonitorGet()` coordinates. No `SetWindowPos`, no
+   DPI context juggling.
+2. **Never use the hook's coordinates.** The hook is only a trigger; the position
+   comes from `MouseGetPos`, which is already logical. (An earlier version
+   converted the hook coordinates with `PhysicalToLogicalPointForPerMonitorDPI`
+   — that works too, but not needing the conversion at all is simpler.)
+
+Things that did **not** work, in case you are about to try them:
+`SetWindowPos` with physical coordinates, `SetThreadDpiAwarenessContext(-4)`
+before `SetWindowPos`, and `SetProcessDpiAwarenessContext(-4)` at script start.
+
+Worked out in [this thread on the AHK forum](https://www.autohotkey.com/boards/viewtopic.php?f=82&t=140331),
+with help from SevenKeyboard, iseahound and lexikos. Lexikos explained why the
+DPI-context approach cannot work from a script: a window procedure restores
+whichever awareness context was active when the window was created, and the
+script's main window exists before the script runs — so
+`SetThreadDpiAwarenessContext` never gets a chance. See his
+[DPI scaling documentation](https://www.autohotkey.com/docs/v2/misc/DPIScaling.htm).
+
+---
+
 ## Known issues / looking for feedback on
 
 - `MinStep` is a fixed pixel value and is **not** DPI-scaled. On a 4K display at
   200 % it is effectively half as coarse. Should it scale with the monitor?
 - `GestureTimeout` runs on a wall clock, not on idle time. A slow, deliberate
   gesture longer than 2 s gets cancelled.
-- Only tested on Windows 11 with two monitors at 100 % and 150 %. Reports from
-  three or more monitors, or from unusual arrangements, would be useful.
+- Tested on exactly one setup: Windows 11, three monitors, 2× 4K at 150 % plus a
+  FullHD laptop panel at 100 %, with the primary monitor on the right and
+  negative X coordinates to the left. Reports from other arrangements — vertical
+  stacks, mixed refresh rates, more than three monitors — would be useful.
+- AutoHotkey **v2.1-alpha.16+ defaults to per-monitor DPI awareness**. The
+  workarounds here should become unnecessary there, but I have not tested
+  against v2.1 yet. If you run v2.1, I would like to hear what happens.
 - The overlay uses GDI on layered windows. On machines without hardware
   acceleration this may still be the slowest part.
 - `Smoothing` at `0.3` is a value that works for me. No idea whether it suits

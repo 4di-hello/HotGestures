@@ -41,7 +41,7 @@ behaves on mixed-DPI multi-monitor setups, and it stops leaking GDI handles.
 | Mixed DPI | Coordinates from `MouseGetPos`, the hook is only a trigger |
 | Robustness | `GestureTimeout`, `Cancel()`, monitor-layout change detection |
 | Leaks | Pen, DC and timer are released on teardown |
-| Tuning | `Smoothing` and `ShowTip` are properties now, not hard-coded |
+| Tuning | `Smoothing`, `MinStep`, `GestureTimeout` and `MaxVectors` are settable |
 
 Full list with rationale: [`CHANGELOG.md`](./CHANGELOG.md).
 
@@ -97,7 +97,7 @@ hgs := HotGestures(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7)
 |---|---|
 | `maxDistance` | Match tolerance, `0`–`2`. Lower is stricter |
 | `minTrackLen` | Minimum track length in pixels; shorter tracks are not a gesture |
-| `penColor` | Color of the drawn track |
+| `penColor` | Color of the drawn track, as a **COLORREF** (`0x00BBGGRR`) — see the note below |
 
 Properties that can be set after construction:
 
@@ -105,8 +105,22 @@ Properties that can be set after construction:
 |---|---|---|
 | `MinStep` | `4` | Minimum movement in px before a vector is recorded |
 | `Smoothing` | `0.3` | Exponential smoothing, `0` disables |
-| `GestureTimeout` | `2000` | Auto-cancel after this many ms, `0` disables |
-| `ShowTip` | `false` | Show a tooltip with the matched gesture name |
+| `GestureTimeout` | `2000` | Cancel a gesture after this many ms, `0` disables |
+| `MaxVectors` | `1500` | Cancel after this many recorded vectors, `0` disables |
+
+Two of these interact in a way that is easy to miss: **smoothing is applied
+before the `MinStep` test**, so the effective step is roughly
+`MinStep / (1 - Smoothing)` — about 5.7 px at the defaults, not 4. `Smoothing`
+is clamped to `0.95`; at `1` nothing would ever register as movement.
+
+`GestureTimeout` and `MaxVectors` are both safety nets, and both end the gesture
+as *cancelled* — `Result.Valid` is `false` and `Result.Comment` is `"Cancelled"`.
+If you use the `Hotkey()` helper, releasing the button after a cancel sends a
+plain right-click, same as for a gesture that was too short.
+
+> **`penColor` is BGR, not RGB.** It goes straight to GDI's `CreatePen`, which
+> takes a `COLORREF`. Passing `0xFF0000` gives you blue, not red. Red is
+> `0x0000FF`.
 
 If recognition feels worse after upgrading, try `hgs.MinStep := 2`. To push CPU
 down further on a high-polling-rate mouse, `6` still works here.
@@ -166,12 +180,63 @@ script's main window exists before the script runs — so
 
 ---
 
+## Upgrading from upstream — what behaves differently
+
+The public API is unchanged, but a few defaults are not. If you are porting an
+existing script, these are the ones that can surprise you:
+
+- **`Smoothing` is `0.3`**, upstream smoothed with a hard-coded `0.5`. Tracks are
+  followed a little more closely now.
+- **`MinStep` is `4`**, upstream recorded every pixel. Very small or very slow
+  gestures may need `hgs.MinStep := 2`.
+- **`penColor` defaults to `0xE8EEF7`** instead of `0xFE4F7F`, so the track is a
+  different color out of the box.
+- **`GestureTimeout` and `MaxVectors` exist and are active.** A gesture that runs
+  longer than 2 s, or past 1500 vectors, is cancelled. Set either to `0` to
+  disable — not recommended for `MaxVectors`, see below.
+- **`ShowTip` and the `DrawTip` code path are gone.** The method was empty, so
+  the property never did anything. It was removed rather than left as a promise
+  the library does not keep.
+- **`__OnMouseMove` now takes `*` instead of `(x, y)`.** Internal, but it matters
+  if you subclassed `HotGestures`.
+- **Gestures containing a zero vector (`0,0`) are rejected** at construction. They
+  have no direction and used to divide by zero in the matcher.
+
+## Limitations worth knowing before you file an issue
+
+- **Elevated windows.** A script that is not running as administrator receives no
+  hook events while an elevated window has focus, and none at all on the secure
+  desktop (UAC prompt, Ctrl+Alt+Del). Gestures silently do nothing there. That is
+  a Windows restriction, not something the library can work around.
+- **Cost grows with gesture length.** Every recorded vector adds a row to each
+  candidate's DTW matrix, and matching walks that matrix. `MaxVectors` is what
+  keeps this bounded — disabling it on a gesture that never ends will make the
+  pointer stutter.
+- **The monitor layout is sampled at `Start()`.** Plugging a monitor in during a
+  gesture is not noticed until the next one.
+
+## Tests
+
+`tests/selftest.ahk` covers what can be checked without a mouse: input
+validation, the gesture round trip, DTW distances for identical, opposite and
+perpendicular tracks, the empty-track edge case, and the coordinate packing used
+for the per-monitor DPI lookup. Run it directly — it reports pass/fail and sets
+the exit code.
+
+It deliberately does **not** cover the hook, the overlay or anything timing
+dependent. Those still need a human and a mouse.
+
+---
+
 ## Known issues / looking for feedback on
 
 - `MinStep` is a fixed pixel value and is **not** DPI-scaled. On a 4K display at
   200 % it is effectively half as coarse. Should it scale with the monitor?
 - `GestureTimeout` runs on a wall clock, not on idle time. A slow, deliberate
-  gesture longer than 2 s gets cancelled.
+  gesture longer than 2 s gets cancelled. Idle-based would be better but
+  fiddlier — opinions welcome.
+- `MaxVectors` at 1500 is far above anything I draw. If you hit it legitimately,
+  I would like to know what you were drawing.
 - Tested on exactly one setup: Windows 11, three monitors, 2× 4K at 150 % plus a
   FullHD laptop panel at 100 %, with the primary monitor on the right and
   negative X coordinates to the left. Reports from other arrangements — vertical

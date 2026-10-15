@@ -1,3 +1,10 @@
+;==========================================================
+;  Gesture Recorder — draw gestures, name them, export code.
+;
+;  Part of HotGestures-Continued. MIT licensed, see LICENSE.
+;  Provided "AS IS", without warranty of any kind.
+;==========================================================
+
 #Include HotGestures.ahk
 GestureRecorder()
 
@@ -6,7 +13,6 @@ GestureRecorder() {
     testing := false
     animation := ""
     itemIndex := 1
-    maxDistance := 0.1
 
     mainWindow := Gui(, "Gesture Recorder")
     mainWindow.SetFont(, "Cascadia Code")
@@ -29,7 +35,6 @@ GestureRecorder() {
     testBtn.OnEvent("Click", TestBtn_Click)
     drawingBoard.OnEvent("Click", DrawingBoard_Click)
     listview.OnEvent("ItemFocus", ListView_ItemFocus)
-    ; listview.OnEvent("ItemSelect", ListView_ItemSelect)
     OnMessage(0x0100, ListView_DeleteKeyDown)
     OnMessage(0x0102, ListView_CtrlC)
     mainWindow.Show()
@@ -44,6 +49,11 @@ GestureRecorder() {
 
     MainWindow_Close(mainWindow) {
         animation := ""
+        ; These are global message hooks, so they must be released explicitly.
+        ; Otherwise they survive the window inside a larger host script.
+        OnMessage(0x0100, ListView_DeleteKeyDown, 0)
+        OnMessage(0x0102, ListView_CtrlC, 0)
+        hgs.Destroy()
         mainWindow.Destroy()
     }
 
@@ -61,9 +71,12 @@ GestureRecorder() {
         OkButton_Click(ctrl, info) {
             try
                 gesture := HotGestures.Gesture(Trim(vectorsEdit.Text, " `r`n`t"))
-            catch
-                MsgBox("Invalid vectors", "Warming")
-            else if AddGesture(gesture)
+            catch as err {
+                dialog.Opt("OwnDialogs")
+                MsgBox("Invalid vectors.`n`n" err.Message, "Warning", "Icon!")
+                return
+            }
+            if AddGesture(gesture)
                 dialog.Destroy()
         }
     }
@@ -71,38 +84,58 @@ GestureRecorder() {
     DeleteBtn_Click(ctrl, info) => DeleteSelections()
 
     GenCodeBtn_Click(ctrl, info) {
-        if CheckDistance(&distance) == ""
+        if !CheckDistance(&distance)
             return
+
         hgsVarName := "hgs"
         part1 := part2 := part3 := ""
+
         loop listview.GetCount() {
             name := listview.GetText(A_Index, 1)
             vectors := listview.GetText(A_Index, 2)
             varName := "gesture" A_Index
-            part1 .= Format('{} := HotGestures.Gesture("{}")`n', varName, name ":" vectors)
-            part2 .= Format('{}.Register({}, "")`n', hgsVarName, varName)
-            part3 .= Format('case {}: `; {}`n            ', varName, name)
+
+            ; The name is free text from an editable ListView. Interpolating it
+            ; raw into a quoted string literal lets a crafted name close the
+            ; literal and append arbitrary code to a snippet the user is about
+            ; to run. Escape it, and keep the comment on a single line.
+            literal := EscapeAhkString(name ":" vectors)
+            comment := SingleLine(name)
+
+            part1 .= varName ' := HotGestures.Gesture("' literal '")' "`n"
+            part2 .= hgsVarName '.Register(' varName ', "")' "`n"
+            part3 .= "case " varName ": `; " comment "`n            "
         }
         part3 .= "default: return"
-        code := Format("
+
+        ; Built by substitution rather than Format(), because the template
+        ; contains literal braces that Format would try to read as fields.
+        template := "
         (
-            {1}
-            {2} := HotGestures({3})
-            {4}
+            %%PART1%%
+            %%HGS%% := HotGestures(%%DISTANCE%%)
+            %%PART2%%
             $RButton::{
-                {2}.Start()
+                %%HGS%%.Start()
                 KeyWait("RButton")
-                {2}.Stop()
-                if {2}.Result.Valid {
-                    switch {2}.Result.MatchedGesture {
-                        {5}
+                %%HGS%%.Stop()
+                if %%HGS%%.Result.Valid {
+                    switch %%HGS%%.Result.MatchedGesture {
+                        %%PART3%%
                     }
                 }
                 else {
                     Send("{RButton}")
                 }
             }
-        )", part1, hgsVarName, Format("{:g}", distance), part2, part3)
+        )"
+
+        code := StrReplace(template, "%%PART1%%", part1)
+        code := StrReplace(code, "%%PART2%%", part2)
+        code := StrReplace(code, "%%PART3%%", part3)
+        code := StrReplace(code, "%%DISTANCE%%", Format("{:g}", distance))
+        code := StrReplace(code, "%%HGS%%", hgsVarName)
+
         codeUi := Gui("+Owner" mainWindow.Hwnd, "Gesture code")
         codeUi.SetFont(, "Cascadia Code")
         codeUi.AddEdit("Multi HScroll w800 h500", code)
@@ -123,13 +156,24 @@ GestureRecorder() {
         else {
             if !CheckDistance(&distance)
                 return
+
+            hgs.Clear()
             hgs.MaxDistance := distance
+
+            bad := 0
             loop listview.GetCount() {
-                name := listview.GetText(A_Index, 1)
-                vectors := listview.GetText(A_Index, 2)
-                gestrue := HotGestures.Gesture(name ":" vectors)
-                hgs.Register(gestrue, "")
+                gesture := RowGesture(A_Index)
+                if !gesture {
+                    bad++
+                    continue
+                }
+                hgs.Register(gesture, "")
             }
+            if bad {
+                mainWindow.Opt("OwnDialogs")
+                MsgBox(bad " row(s) contain invalid vectors and were skipped.", "Warning", "Icon!")
+            }
+
             animation := ""
             InitDrawingBoard()
             testBtn.Text := "Stop Test"
@@ -153,11 +197,20 @@ GestureRecorder() {
                     statusBar.Text := "no match"
             }
             else {
-                newGesture := HotGestures.Gesture("Unnamed" itemIndex++, result.Vectors)
+                try
+                    newGesture := HotGestures.Gesture("Unnamed" itemIndex++, result.Vectors)
+                catch as err {
+                    statusBar.Text := "could not record: " err.Message
+                    InitDrawingBoard()
+                    return
+                }
                 AddGesture(newGesture)
             }
         }
         else {
+            ; Cancelled, too short, or over the vector cap.
+            if (result.Comment = "Cancelled")
+                statusBar.Text := "gesture cancelled (timeout or too long)"
             InitDrawingBoard()
         }
     }
@@ -181,42 +234,56 @@ GestureRecorder() {
     }
 
     ListView_ItemFocus(ctrl, item) {
-        ; if focus changed because of deleting a item, the item index passed in is incorrect.
+        ; if focus changed because of deleting an item, the item index passed in is incorrect.
         if item := listview.GetNext(0, "Focused") {
-            name := listview.GetText(item, 1)
-            vectorsStr := listview.GetText(item, 2)
-            gesture := HotGestures.Gesture(name, vectorsStr)
+            gesture := RowGesture(item)
+            if !gesture {
+                statusBar.Text := "invalid vectors in this row"
+                InitDrawingBoard("")
+                return
+            }
             animation := CreateAnimation(gesture)
         }
     }
 
+    /**
+     * Builds a Gesture from a ListView row. Returns "" if the row does not
+     * parse — the cells are user-editable, so this is a normal outcome, not
+     * an exception.
+     */
+    RowGesture(row) {
+        name := listview.GetText(row, 1)
+        vectors := listview.GetText(row, 2)
+        try
+            return HotGestures.Gesture(name, vectors)
+        catch
+            return ""
+    }
+
     AddGesture(newGesture) {
+        if !CheckDistance(&threshold)
+            threshold := 0.1
+
         prompt := ""
-        for name, vectorsStr in GesturesEnumerator() {
-            d := newGesture.Compare(HotGestures.Gesture(name ":" vectorsStr))
-            if d <= maxDistance {
-                prompt .= "`n    Name: " name "`tDistance: " d
-            }
+        loop listview.GetCount() {
+            other := RowGesture(A_Index)
+            if !other
+                continue
+            d := newGesture.Compare(other)
+            if d <= threshold
+                prompt .= "`n    Name: " listview.GetText(A_Index, 1) "`tDistance: " d
         }
+
         if prompt != "" {
             mainWindow.Opt("OwnDialogs")
-            prompt := "This gesture is too similar to the following:" prompt "`n`nAre you sure to add it?"
-            if "No" = MsgBox(prompt, "Warming", 0x4)
+            prompt := "This gesture is too similar to the following:" prompt "`n`nAre you sure you want to add it?"
+            if "No" = MsgBox(prompt, "Warning", 0x4)
                 return false
         }
+
         listview.Add("Vis Focus", newGesture.Name, newGesture.ToString())
         animation := CreateAnimation(newGesture)
         return true
-    }
-
-    GesturesEnumerator() {
-        return enum
-        enum(&name, &vectors) {
-            if A_Index > listview.GetCount()
-                return false
-            name := listview.GetText(A_Index, 1)
-            vectors := listview.GetText(A_Index, 2)
-        }
     }
 
     CreateAnimation(gesture, interval := 20, repeatInterval := 1000) {
@@ -235,14 +302,28 @@ GestureRecorder() {
         h := bottom - top
 
         dc := DllCall("GetDC", "ptr", drawingBoard.Hwnd, "ptr")
-        ; transform
+        if !dc
+            return ""
+
         drawingBoard.GetPos(, , &boardW, &boardH)
         boardW *= A_ScreenDPI / 96
         boardH *= A_ScreenDPI / 96
+
         xform := Buffer(24)
         scale := 1
-        if w > boardH - 5 || h > boardH - 5 {
-            scale := Min((boardW - 10) / w, (boardH - 10) / h)
+        ; A straight gesture has zero extent on one axis. Dividing by it was a
+        ; crash; scale only by the axis that actually has a size.
+        if (w > boardW - 5 || h > boardH - 5) {
+            sx := w > 0 ? (boardW - 10) / w : ""
+            sy := h > 0 ? (boardH - 10) / h : ""
+            if (sx != "" && sy != "")
+                scale := Min(sx, sy)
+            else if (sx != "")
+                scale := sx
+            else if (sy != "")
+                scale := sy
+            if (scale <= 0)
+                scale := 1
             w *= scale, h *= scale, left *= scale, top *= scale
         }
         NumPut("float", scale, "float", 0, "float", 0, "float", scale, "float", (boardW - w) / 2 - left, "float", (boardH - h) / 2 - top, xform)
@@ -250,7 +331,7 @@ GestureRecorder() {
         DllCall("SetWorldTransform", "ptr", dc, "ptr", xform)
 
         pen := DllCall("CreatePen", "int", 0, "int", 5, "uint", 0xFE4F7F, "ptr")
-        DllCall("SelectObject", "ptr", dc, "ptr", pen, "ptr")
+        oldPen := pen ? DllCall("SelectObject", "ptr", dc, "ptr", pen, "ptr") : 0
 
         index := 1
         SetTimer(LineToNextPoint, interval)
@@ -275,26 +356,39 @@ GestureRecorder() {
 
         __Delete(_) {
             SetTimer(LineToNextPoint, 0)
-            DllCall("DeleteObject", "ptr", pen)
-            DllCall("ReleaseDC", "ptr", dc)
+            if oldPen
+                DllCall("SelectObject", "ptr", dc, "ptr", oldPen)
+            if pen
+                DllCall("DeleteObject", "ptr", pen)
+            ; ReleaseDC takes the window handle as well — passing only the DC
+            ; makes the call fail silently and leaks the device context.
+            DllCall("ReleaseDC", "ptr", drawingBoard.Hwnd, "ptr", dc)
         }
     }
 
     InitDrawingBoard(text?) {
         text := text ?? "Draw gestures here with the left button"
         dc := DllCall("GetDC", "ptr", drawingBoard.Hwnd, "ptr")
+        if !dc
+            return
+
         drawingBoard.GetPos(, , &boardW, &boardH)
         boardW *= A_ScreenDPI / 96
         boardH *= A_ScreenDPI / 96
         DllCall("Rectangle", "ptr", dc, "int", 0, "int", 0, "int", boardW, "int", boardH)
+
+        oldFont := 0
         if text {
             rect := Buffer(16)
             NumPut("int64", 0, "int", boardW, "int", boardH, rect)
             font := SendMessage(0x0031, 0, 0, drawingBoard)
-            DllCall("SelectObject", "ptr", dc, "ptr", font, "ptr")
+            oldFont := DllCall("SelectObject", "ptr", dc, "ptr", font, "ptr")
             DllCall("DrawTextW", "ptr", dc, "str", text, "int", StrLen(text), "ptr", rect, "uint", 0x125)
         }
-        DllCall("ReleaseDC", "ptr", dc)
+
+        if oldFont
+            DllCall("SelectObject", "ptr", dc, "ptr", oldFont)
+        DllCall("ReleaseDC", "ptr", drawingBoard.Hwnd, "ptr", dc)
     }
 
     DeleteSelections() {
@@ -327,5 +421,21 @@ GestureRecorder() {
         }
         statusBar.Text := "invalid distance"
         return false
+    }
+
+    /** Escapes a string for use inside an AHK v2 double-quoted literal. */
+    EscapeAhkString(s) {
+        s := StrReplace(s, "``", "````")
+        s := StrReplace(s, '"', '`"')
+        s := StrReplace(s, "`r", "``r")
+        s := StrReplace(s, "`n", "``n")
+        return s
+    }
+
+    /** Collapses line breaks so a name cannot escape a `; comment. */
+    SingleLine(s) {
+        s := StrReplace(s, "`r", " ")
+        s := StrReplace(s, "`n", " ")
+        return s
     }
 }

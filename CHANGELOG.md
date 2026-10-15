@@ -22,8 +22,6 @@ appears to be unmaintained.
 - **`Cancel()`** — ends recording and marks the result invalid.
 - **`Smoothing`** (default `0.3`, `0` disables) — exponential smoothing of the
   pointer position. Upstream smoothed with a hard-coded `0.5`.
-- **`ShowTip`** (default `false`) — the tooltip code path is kept but off by
-  default.
 - Precomputed vector magnitudes on `Gesture` (`Magnitudes`) instead of
   recomputing `Sqrt()` for every template vector on every comparison.
 
@@ -63,10 +61,102 @@ appears to be unmaintained.
 - **Timer leak** — the timeout timer is cleared in `Stop()`, including on the
   cancelled path.
 
+### Removed
+
+- **`ShowTip` and `DrawTip`.** `DrawTip` was an empty method, so the property had
+  no effect. Removed rather than shipped as a promise the library does not keep.
+
+### Hardening (review pass before first release)
+
+- **Infinity sentinel.** The matrix used
+  `NumGet(ObjPtr(&_ := 0x7F800000) + A_PtrSize * 2, "float")` to synthesise
+  `+inf` by reading the raw bytes of a VarRef. That depends on AHK's internal
+  memory layout and would have broken *silently* on a layout change — the
+  sentinel would become an ordinary number and `Min()` comparisons would be
+  wrong without any error. Replaced with `1.0e15`. Real DTW costs stay below
+  `1e5` (at most 2 per step), so it is equivalent and version-proof. Relevant
+  because v2.1-alpha already changes DPI defaults.
+- **Zero vectors are rejected** in `VerifyVectorsString` and
+  `VerifyVectorsArray`. `0,0` passed validation, then divided by zero in
+  `Append` — inside the hook callback. Reachable from the recorder's *Add*
+  dialog by pasting a gesture list. `Append` and `TraceBack` also guard against
+  a zero denominator now.
+- **Digit count is bounded** in the vector pattern, so `Integer()` can no longer
+  be handed an overflowing literal.
+- **Overlay rebuilds moved out of the hook callback.** `Show()` used to check the
+  monitor hash and could rebuild every overlay window — creating GUIs, DCs and
+  pens — from inside the low-level hook. Exceeding `LowLevelHooksTimeout`
+  (300 ms by default) makes Windows remove the hook without a word. The rebuild
+  now happens in `Start()`, on a normal thread, via `DrawingBoard.EnsurePanels()`.
+  Only the cheap `Gui.Show()` stays in the hook.
+- **POINT packing fixed** in `__GetMonitorScale`. `px | (py << 32)` sign-extends a
+  negative x across all 64 bits, so the packed y was read as `-1` and
+  `MonitorFromPoint` was asked about the wrong location. Monitors to the left of
+  the primary have negative coordinates. Masked with `px & 0xFFFFFFFF`. Latent
+  on layouts where every monitor has `top = 0`; wrong on vertical stacks.
+- **A second `Start()` without `Stop()`** orphaned the timeout timer, which then
+  fired into the following gesture and cancelled it. `Start()` now winds the
+  previous gesture down first, and the bound function is created once per
+  gesture and cleared in `Stop()`.
+- **`Stop()` is idempotent** and no longer throws when called without a preceding
+  `Start()`.
+- **`MaxVectors`** (default `1500`) caps the recorded vectors. Without it, holding
+  the button and moving kept appending rows to every matrix while `TraceBack`
+  walks them — cost per move grows with the count, so a long gesture degraded
+  into a stuttering pointer. The abort is dispatched to a normal thread with
+  `SetTimer(..., -1)`, because releasing the hook object from inside its own
+  callback frees a callback that is still running.
+- **Excluded candidates are skipped in `__UpdateMatch`.** Their matrix is frozen,
+  so `TraceBack` returned a constant — `O(rows)` of pure waste per move, exactly
+  in the hottest loop.
+- **`Smoothing` is clamped** to `0..0.95` and `MinStep` to `>= 0`, both
+  normalised once per gesture instead of being re-read inside the hook. At
+  `Smoothing := 1` no movement would ever have registered.
+- **`Register` rejects anything that is not a `HotGestures.Gesture`**, and
+  `DistanceMatrix` checks for usable `Magnitudes`, instead of failing later with
+  an unhelpful error.
+- **`Destroy()`** added. An instance handed to `Hotkey()` is referenced by AHK's
+  global hotkey table and is never collected, so `__Delete` does not run on its
+  own.
+
+### Gesture Recorder
+
+- **Code injection in *Generate Code* closed.** Gesture names come from an
+  editable ListView and were interpolated raw into a quoted string literal and
+  into a `;` comment. A crafted name could close the literal and append
+  arbitrary code to a snippet the user copies in order to run it. Names are
+  escaped now and comments collapsed to one line. The template is assembled by
+  substitution instead of `Format()`, which would otherwise read the literal
+  braces of the generated code as fields.
+- **`ReleaseDC` was called with one argument instead of two**, so it failed and
+  leaked a device context on every call — including `InitDrawingBoard`, which
+  runs on each click and selection. A long session walked towards the 10,000
+  GDI object limit. Pen and font are restored as well.
+- **Division by zero on straight gestures.** A purely vertical or horizontal
+  gesture has zero extent on one axis; the preview scaling divided by it. The
+  axis comparison was also checking width against the board's *height*.
+- **Invalid rows no longer crash the recorder.** The ListView is editable, so a
+  row can stop parsing at any time. Selecting, testing or exporting such a row
+  threw. Rows are parsed defensively and reported instead.
+- **The similarity check uses the Max Distance field** rather than a hard-coded
+  `0.1` that ignored it.
+- Message hooks are released when the window closes, `"Warming"` is spelled
+  `"Warning"`, and a misspelled variable was fixed.
+
+### Tests
+
+- `tests/selftest.ahk` — validation, gesture round trip, DTW distances for
+  identical, opposite and perpendicular tracks, the empty-track edge case and
+  the coordinate packing. No mouse, no hook, no GUI.
+
 ### Notes for consumers
 
 - `__OnMouseMove` now takes `*` instead of `(x, y)`. This is internal, but
   anyone who subclassed `HotGestures` should be aware.
+- `ShowTip` no longer exists. Setting it is now a no-op property assignment
+  rather than a setting that silently did nothing.
+- Gestures containing `0,0` are rejected at construction instead of failing
+  later inside the hook.
 - Default pen color is `0xE8EEF7` (upstream: `0xFE4F7F`) and pen width is 1.
   Both are cosmetic; pass `penColor` to `__New` to override.
 

@@ -17,7 +17,7 @@
 hgs := HotGestures(maxDistance := 0.18, minTrackLen := 40)
 hgs.Smoothing      := 0.3
 hgs.GestureTimeout := 2000
-hgs.ShowTip        := false
+hgs.MaxVectors     := 1500
 
 ;----------------------------------------------------------
 ;  Why not #HotIf

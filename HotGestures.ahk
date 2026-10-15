@@ -18,29 +18,70 @@
 class HotGestures {
     __matchInfos := Map()
 
-__New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
-        this.MaxDistance := maxDistance
+    /**
+     * @param maxDistance  match tolerance, 0..2 — lower is stricter
+     * @param minTrackLen  minimum track length in logical px
+     * @param penColor     COLORREF (0x00BBGGRR), NOT RGB — see README
+     */
+    __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
+        this.MaxDistance    := maxDistance
         this.MinTrackLength := minTrackLen
-        this.ShowTip := false
-        this.Smoothing := 0.3 ;0 = aus, 0.5 = stark (war früher fest 0.5)
-        this.GestureTimeout := 2000  ; ms, 0 = kein Timeout
-        this.__hDesktop := DllCall("GetDesktopWindow", "ptr")
+
+        ; Exponential smoothing of the pointer position. 0 disables.
+        ; Clamped to 0..0.95 at Start(); at 1 no movement would ever register.
+        ; Note it is applied BEFORE the MinStep test, so the effective step is
+        ; roughly MinStep / (1 - Smoothing).
+        this.Smoothing := 0.3
+
+        ; Minimum movement in px before a vector is recorded. 0 records every move.
+        this.MinStep := 4
+
+        ; Safety net: cancel a gesture that is never finished. 0 disables.
+        this.GestureTimeout := 2000
+
+        ; Hard upper bound on recorded vectors. Protects against an unbounded
+        ; matrix when the button is held and the mouse keeps moving. 0 disables,
+        ; which is NOT recommended — cost per move grows with the vector count.
+        this.MaxVectors := 1500
+
+        this.__hDesktop     := DllCall("GetDesktopWindow", "ptr")
         this.__drawingBoard := HotGestures.DrawingBoard(penColor)
-        this.__timeout := ""
-        this.__cancelled := false
-		this.MinStep := 4 ; Mindestbewegung in px pro Vektor (siehe Punkt 2)
-        this.__shown := false
+        this.__cancelFn     := ""
+        this.__cancelled    := false
+        this.__running      := false
+        this.__shown        := false
+        this.__match        := ""
+        this.__vectors      := []
     }
 
-    __Delete() => this.__drawingBoard.Destroy()
+    __Delete() => this.Destroy()
+
+    /**
+     * Releases the overlay windows and GDI objects.
+     *
+     * Note: an instance passed to Hotkey() is referenced by AHK's global
+     * hotkey table and is therefore never collected, so __Delete will not
+     * run on its own. Call Destroy() explicitly if you discard an instance.
+     */
+    Destroy() {
+        try this.Stop()
+        if this.__drawingBoard {
+            this.__drawingBoard.Destroy()
+            this.__drawingBoard := ""
+        }
+    }
 
     Register(gesture, comment, callback := "") {
+        if !(gesture is HotGestures.Gesture)
+            throw TypeError("Register expects a HotGestures.Gesture", , Type(gesture))
+
         matchInfo := {
-            Gesture: gesture,
-            Comment: comment,
+            Gesture:  gesture,
+            Comment:  comment,
             Callback: callback,
-            Matrix: HotGestures.DistanceMatrix(gesture),
-            Excluded: false
+            Matrix:   HotGestures.DistanceMatrix(gesture),
+            Excluded: false,
+            Distance: ""
         }
         this.__matchInfos.Set(gesture, matchInfo)
     }
@@ -54,7 +95,7 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
         if keyName == ""
             throw Error("invalid key name")
 
-        sendIfNoMoved := !(keyName ~= "Control|Shift|Alt|Win")
+        sendIfNoMoved := !(keyName ~= "i)Control|Shift|Alt|Win")
         Hotkey("$" keyName, OnHotkey, options)
 
         OnHotkey(_) {
@@ -84,100 +125,138 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
     }
 
     Start() {
+        ; A second Start() without Stop() would orphan the running timer and
+        ; the installed hook, so wind the previous gesture down first.
+        if this.__running
+            this.Stop()
+
         CoordMode("Mouse", "Screen")
         MouseGetPos(&x, &y)
 
         this.__lastX := x
         this.__lastY := y
-        this.__scaledMinTrackLen := this.MinTrackLength * this.__GetMonitorScale(x, y)
-
-        ; Overlay erst bei der ersten echten Bewegung anzeigen
         this.__startX := x
         this.__startY := y
-        this.__shown := false
+        this.__scaledMinTrackLen := this.MinTrackLength * this.__GetMonitorScale(x, y)
 
-        this.__trackLen := 0
-        this.__match := ""
-        this.__vectors := []
+        ; Normalise the user-settable knobs once per gesture instead of
+        ; re-validating them inside the hook callback.
+        s := this.Smoothing
+        this.__smoothing  := s < 0 ? 0 : (s > 0.95 ? 0.95 : s)
+        step              := this.MinStep < 0 ? 0 : this.MinStep
+        this.__minStepSq  := step * step
+        this.__maxVectors := this.MaxVectors < 0 ? 0 : this.MaxVectors
+
+        this.__trackLen  := 0
+        this.__match     := ""
+        this.__vectors   := []
         this.__cancelled := false
-		
+        this.__shown     := false
+
         for , mi in this.__matchInfos {
             mi.Excluded := false
+            mi.Distance := ""
             mi.Matrix.Clear()
         }
 
         this.Result := {
-            Valid: false,
-            Vectors: this.__vectors,
+            Valid:          false,
+            Vectors:        this.__vectors,
             MatchedGesture: "",
-            Distance: "",
-            Comment: ""
+            Distance:       "",
+            Comment:        ""
         }
 
+        ; Rebuild the overlays here, in a normal thread. Doing this inside the
+        ; mouse hook risks exceeding LowLevelHooksTimeout, after which Windows
+        ; silently removes the hook.
+        this.__drawingBoard.EnsurePanels()
+
+        ; Install the hook first: if it fails, nothing is left half-armed.
         this.__mouseHook := HotGestures.MouseHook(this.__OnMouseMove.Bind(this))
 
-        ;Sicherheits-Timeout: Geste nach 2 Sekunden automatisch abbrechen
-        this.__timeout := ObjBindMethod(this, "Cancel")
+        ; One bound function per gesture, cleared in Stop(). Reusing it for both
+        ; the timeout and the vector-cap abort keeps SetTimer unambiguous.
+        this.__cancelFn := ObjBindMethod(this, "Cancel")
+        this.__running := true
+
         if this.GestureTimeout > 0
-            SetTimer(this.__timeout, -(this.GestureTimeout))
+            SetTimer(this.__cancelFn, -(this.GestureTimeout))
     }
 
     Cancel() {
+        if !this.__running
+            return
         this.__cancelled := true
         this.Stop()
     }
 
     Stop() {
-        ; Timeout stoppen
-        if this.__timeout {
-            SetTimer(this.__timeout, 0)
-            this.__timeout := ""
+        if !this.__running
+            return
+        this.__running := false
+
+        if this.__cancelFn {
+            SetTimer(this.__cancelFn, 0)
+            this.__cancelFn := ""
         }
 
         this.__mouseHook := ""
 
         if this.__cancelled {
-            this.Result.Valid := false
+            this.Result.Valid          := false
             this.Result.MatchedGesture := ""
-            this.Result.Distance := ""
-            this.Result.Comment := "Cancelled"
-            if this.__shown {
-				this.__drawingBoard.Hide()
-				this.__shown := false
+            this.Result.Distance       := ""
+            this.Result.Comment        := "Cancelled"
         }
-            return
-        }
-
-        if this.__trackLen >= this.__scaledMinTrackLen {
+        else if this.__trackLen >= this.__scaledMinTrackLen {
             this.Result.Valid := true
             if this.__match {
                 this.Result.MatchedGesture := this.__match.Gesture
-                this.Result.Distance := this.__match.Distance
-                this.Result.Comment := this.__match.Comment
+                this.Result.Distance       := this.__match.Distance
+                this.Result.Comment        := this.__match.Comment
             }
         }
 
-            if this.__shown {
-				this.__drawingBoard.Hide()
-				this.__shown := false
+        this.__HideBoard()
+    }
+
+    __HideBoard() {
+        if this.__shown {
+            this.__drawingBoard.Hide()
+            this.__shown := false
         }
     }
 
     __OnMouseMove(*) {
-        ; Hook nur als Trigger, Position über MouseGetPos im logischen AHK-Koordinatensystem
+        if this.__cancelled
+            return
+
+        ; The hook is only a trigger. The hook's own coordinates are physical
+        ; pixels, while the rest of AHK v2 works in logical ones.
         CoordMode("Mouse", "Screen")
         MouseGetPos(&x, &y)
 
-        ; Glättung – reduziert Zittern ohne Richtung zu verfälschen
-        if this.Smoothing > 0 {
-            x := Round(x * (1 - this.Smoothing) + this.__lastX * this.Smoothing)
-            y := Round(y * (1 - this.Smoothing) + this.__lastY * this.Smoothing)
+        if this.__smoothing > 0 {
+            x := Round(x * (1 - this.__smoothing) + this.__lastX * this.__smoothing)
+            y := Round(y * (1 - this.__smoothing) + this.__lastY * this.__smoothing)
         }
 
         dx := x - this.__lastX
         dy := y - this.__lastY
-        if (dx * dx + dy * dy < this.MinStep * this.MinStep)
+        if (dx * dx + dy * dy < this.__minStepSq)
             return
+
+        ; Hard cap. Abort rather than let the matrices grow without bound.
+        ; The actual teardown runs on a normal thread, because releasing the
+        ; hook object from inside its own callback frees a callback that is
+        ; still executing.
+        if (this.__maxVectors > 0 && this.__vectors.Length >= this.__maxVectors) {
+            this.__cancelled := true
+            if this.__cancelFn
+                SetTimer(this.__cancelFn, -1)
+            return
+        }
 
         if !this.__shown {
             this.__drawingBoard.Show()
@@ -188,27 +267,13 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
         this.__drawingBoard.DrawLineTo(x, y)
 
         newVector := [dx, dy]
-
         this.__vectors.Push(newVector)
         this.__BuildMatrixes(newVector)
 
         if this.__trackLen < this.__scaledMinTrackLen
             this.__trackLen += Sqrt(dx * dx + dy * dy)
-			
-        else if this.__UpdateMatch() && this.ShowTip {
-            tip := ""
-            if this.__match {
-                name := this.__match.Gesture.Name
-                comment := this.__match.Comment
-                if name != "" && comment != ""
-                    tip := name ": " comment
-                else if name == ""
-                    tip := comment
-                else if comment == ""
-                    tip := name
-            }
-            this.__drawingBoard.DrawTip(tip)
-        }
+        else
+            this.__UpdateMatch()
 
         this.__lastX := x
         this.__lastY := y
@@ -225,6 +290,11 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
         minDist := this.MaxDistance
 
         for , mi in this.__matchInfos {
+            ; An excluded matrix is frozen, so its TraceBack is constant and
+            ; already above the threshold. Re-running it costs O(rows).
+            if mi.Excluded
+                continue
+
             distance := mi.Matrix.TraceBack()
             if distance <= minDist {
                 mi.Distance := minDist := distance
@@ -243,8 +313,8 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
     }
 
     __GetMonitorScale(x, y) {
-        ; Für die Mindestlänge reicht hier ein pragmatischer Weg.
-        ; Wenn etwas fehlschlägt, fallback auf 1.0 statt kaputten Werten.
+        ; Only used to scale MinTrackLength. Any failure falls back to 1.0
+        ; rather than feeding a broken value into the threshold.
         pt := Buffer(8, 0)
         NumPut("int", x, pt, 0)
         NumPut("int", y, pt, 4)
@@ -259,7 +329,12 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
         px := NumGet(pt, 0, "int")
         py := NumGet(pt, 4, "int")
 
-        hMon := DllCall("MonitorFromPoint", "int64", px | (py << 32), "uint", 2, "ptr")
+        ; px must be masked: a negative x is sign-extended across all 64 bits,
+        ; and the OR would then overwrite the packed y with -1. Monitors left
+        ; of the primary one have negative coordinates.
+        pack := (px & 0xFFFFFFFF) | (py << 32)
+
+        hMon := DllCall("MonitorFromPoint", "int64", pack, "uint", 2, "ptr")
         if !hMon
             return 1.0
 
@@ -302,9 +377,9 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
     class DrawingBoard {
         __New(penColor) {
             this.__penColor := penColor
-            this.__panels := Map()
-            this.__lastX := 0
-            this.__lastY := 0
+            this.__panels   := Map()
+            this.__lastX    := 0
+            this.__lastY    := 0
             this.__lastHash := ""
             this.__lastPanel := ""
             this.__BuildPanels()
@@ -315,7 +390,6 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
         Destroy() {
             for , p in this.__panels {
-                ; alten Pen wieder zurücksetzen
                 if p.HasOwnProp("oldPen") && p.oldPen
                     DllCall("SelectObject", "ptr", p.dc, "ptr", p.oldPen)
 
@@ -328,6 +402,20 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
                 try p.gui.Destroy()
             }
             this.__panels := Map()
+            this.__lastPanel := ""
+            this.__lastHash  := ""
+        }
+
+        /**
+         * Rebuilds the overlays if the monitor layout changed. Call this from
+         * a normal thread, never from the hook callback.
+         */
+        EnsurePanels() {
+            hash := this.__GetMonitorHash()
+            if (hash != this.__lastHash || this.__panels.Count = 0) {
+                this.__BuildPanels()
+                this.__lastHash := hash
+            }
         }
 
         __BuildPanels() {
@@ -358,7 +446,6 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
                 oldPen := DllCall("SelectObject", "ptr", dc, "ptr", pen, "ptr")
                 if !oldPen {
-                    ; Wenn SelectObject fehlschlägt, räumen wir sauber auf.
                     DllCall("DeleteObject", "ptr", pen)
                     DllCall("ReleaseDC", "ptr", hwnd, "ptr", dc)
                     try g.Destroy()
@@ -383,31 +470,20 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
         __GetPanel(x, y) {
             best := ""
-            bestDist := 999999
+            bestDist := ""
 
             for , p in this.__panels {
                 if (x >= p.left && x < p.right && y >= p.top && y < p.bottom)
                     return p
 
                 d := Abs(x - (p.left + p.w // 2)) + Abs(y - (p.top + p.h // 2))
-                if (d < bestDist) {
+                if (bestDist = "" || d < bestDist) {
                     bestDist := d
                     best := p
                 }
             }
 
             return best
-        }
-
-        Show() {
-            hash := this.__GetMonitorHash()
-            if (hash != this.__lastHash) {
-                this.__BuildPanels()
-                this.__lastHash := hash
-            }
-
-            for , p in this.__panels
-                p.gui.Show("NoActivate x" p.left " y" p.top " w" p.w " h" (p.h - 1))
         }
 
         __GetMonitorHash() {
@@ -417,6 +493,11 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
                 h .= L "," T "," R "," B "|"
             }
             return h
+        }
+
+        Show() {
+            for , p in this.__panels
+                p.gui.Show("NoActivate x" p.left " y" p.top " w" p.w " h" (p.h - 1))
         }
 
         Hide() {
@@ -451,38 +532,28 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
             this.__lastX := x
             this.__lastY := y
         }
-
-        ; absichtlich leer – Codepfad bleibt erhalten
-        DrawTip(text) {
-						  
-						 
-				
-							 
-        }
     }
 
     class Gesture extends Array {
         __New(name, vectors?) {
             valid := false
             if IsSet(vectors) {
-                if vectors is String {
+                if vectors is String
                     valid := HotGestures.Gesture.VerifyVectorsString(vectors, , &vectorsArr)
-                }
-                else if vectors is Array {
+                else if vectors is Array
                     valid := HotGestures.Gesture.VerifyVectorsArray(vectors, &vectorsArr)
-                }
             }
             else {
                 valid := HotGestures.Gesture.VerifyVectorsString(name, &name, &vectorsArr)
             }
 
             if !valid
-                throw Error("invalid parameter(s)")
+                throw ValueError("invalid gesture vectors — expected `"[name:]x,y[|x,y]...`" with at least one non-zero vector")
 
             this.Name := name
             super.__New(vectorsArr*)
 
-            ; Vektor-Längen vorab berechnen
+            ; Precomputed so the matcher does not call Sqrt per comparison.
             this.Magnitudes := []
             for v in this
                 this.Magnitudes.Push(Sqrt(v[1]**2 + v[2]**2))
@@ -504,35 +575,63 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
         static VerifyVectorsArray(vectorsArr, &copy) {
             copy := []
+            if !(vectorsArr is Array)
+                return false
+
             for v in vectorsArr {
-                if v.Length != 2
+                if !(v is Array) || v.Length != 2
                     return false
                 if !(v[1] is Integer) || !(v[2] is Integer)
                     return false
+                ; A zero-length vector has no direction. It would divide by zero
+                ; in the matcher, so it is rejected at construction time.
+                if (v[1] = 0 && v[2] = 0)
+                    return false
                 copy.Push([v[1], v[2]])
             }
-            return true
+            return copy.Length > 0
         }
 
         static VerifyVectorsString(vectorsStr, &name?, &vectorsArr?) {
-            if res := RegExMatch(vectorsStr, "^(?:(.*):)?((?:-?\d+,-?\d+)(?:\|-?\d+,-?\d+)*)$", &m) {
-                name := m[1]
-                vectorsArr := []
-                loop parse m[2], "|" {
-                    v := StrSplit(A_LoopField, ",", , 2)
-                    vectorsArr.Push([Integer(v[1]), Integer(v[2])])
-                }
+            if !(vectorsStr is String)
+                return false
+
+            ; Digits are bounded so Integer() cannot be fed an overflowing literal.
+            if !RegExMatch(vectorsStr, "^(?:(.*):)?((?:-?\d{1,9},-?\d{1,9})(?:\|-?\d{1,9},-?\d{1,9})*)$", &m)
+                return false
+
+            arr := []
+            loop parse m[2], "|" {
+                v := StrSplit(A_LoopField, ",", , 2)
+                a := Integer(v[1])
+                b := Integer(v[2])
+                if (a = 0 && b = 0)
+                    return false
+                arr.Push([a, b])
             }
-            return !!res
+
+            ; Only write the byref outputs once the input is known good.
+            name := m[1]
+            vectorsArr := arr
+            return true
         }
     }
 
     class DistanceMatrix extends Array {
-        __New(standard) {
-            static INF := NumGet(ObjPtr(&_ := 0x7F800000) + A_PtrSize * 2, "float")
+        ; Not an actual infinity. The previous version read the raw bytes of a
+        ; VarRef to synthesise one, which depends on AHK's internal memory
+        ; layout and would break silently on a layout change. Real DTW costs
+        ; stay well below 1e5 (max 2 per step), so this sentinel is equivalent
+        ; and survives any AHK version.
+        static INF := 1.0e15
 
+        __New(standard) {
             if !len := standard.Length
-                throw Error("invalid parameter")
+                throw ValueError("DistanceMatrix needs a gesture with at least one vector")
+            if !(standard.HasOwnProp("Magnitudes") && standard.Magnitudes.Length = len)
+                throw ValueError("DistanceMatrix expects a HotGestures.Gesture")
+
+            INF := HotGestures.DistanceMatrix.INF
 
             this.Standard := standard
             this.Capacity := len + 1
@@ -549,7 +648,7 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
         Append(newVector) {
             magNew := Sqrt(newVector[1]**2 + newVector[2]**2)
-            if (magNew == 0)
+            if (magNew = 0)
                 return
 
             standard := this.Standard
@@ -558,8 +657,17 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
 
             this.Push(newRow := this.RowTemplate.Clone())
             loop standard.Length {
-                dot := newVector[1] * standard[A_Index][1] + newVector[2] * standard[A_Index][2]
-                dist := 1 - (dot / (magNew * mags[A_Index]))
+                denom := magNew * mags[A_Index]
+                if (denom = 0) {
+                    ; Defence in depth — zero vectors are rejected at
+                    ; construction, so this should be unreachable. 2 is the
+                    ; maximum possible cosine distance.
+                    dist := 2.0
+                }
+                else {
+                    dot := newVector[1] * standard[A_Index][1] + newVector[2] * standard[A_Index][2]
+                    dist := 1 - (dot / denom)
+                }
                 newRow.Push(dist + Min(newRow[A_Index], lastRow[A_Index], lastRow[A_Index + 1]))
             }
         }
@@ -574,7 +682,12 @@ __New(maxDistance := 0.1, minTrackLen := 100, penColor := 0xE8EEF7) {
                 }
                 count++
             }
-            return this[-1][-1] / (count + i + j - 2)
+
+            denom := count + i + j - 2
+            if (denom <= 0)
+                return 2.0      ; nothing to compare against — maximum distance
+
+            return this[-1][-1] / denom
         }
 
         Clear() => this.Length := 1

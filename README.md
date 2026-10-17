@@ -79,11 +79,35 @@ hgs.Hotkey("RButton")   ; right button starts a gesture, a plain click still wor
 
 ### Recording your own gestures
 
-Writing vector strings by hand is no fun. Run `GestureRecorder.ahk`, draw on the
-whiteboard with the left button, select the result in the list and copy it with
-`Ctrl+C`. *Generate Code* gives you a ready-made template.
+Writing vector strings by hand is no fun. Run `GestureRecorder.ahk` and **hold
+the right mouse button** while drawing on the white board — the same button you
+trigger gestures with in practice. Select a row and `Ctrl+C` copies its vectors.
 
 ![Gesture Recorder](./pic/recorder.jpg)
+
+*Generate Code* offers two flavours:
+
+- **Complete script** — standalone, with its own `$RButton::` trigger.
+- **Gesture definitions only** — just the `Gesture(...)` and `Register(...)`
+  lines, for a script that already has an instance and a trigger of its own.
+
+From there you can copy to the clipboard, save as a new file, or **insert into an
+existing script**. The insert writes between two markers:
+
+```autohotkey
+; === HOTGESTURES-CONTINUED: GESTURES BEGIN (generated, do not edit) ===
+...
+; === HOTGESTURES-CONTINUED: GESTURES END ===
+```
+
+Re-exporting replaces whatever is between them, so your own code stays put as
+long as it lives outside the markers. If the file has no markers yet, the block
+is appended after you confirm. A timestamped `.bak` is written first, the file's
+line endings and byte order mark are preserved, and the new content goes through
+a temporary file so a failure cannot leave half a script behind.
+
+The recorder draws in a loud pink (`0xFE4F7F`) rather than the library default,
+which is a pale grey that all but disappears on the white board.
 
 ---
 

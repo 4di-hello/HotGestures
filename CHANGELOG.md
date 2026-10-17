@@ -143,6 +143,24 @@ appears to be unmaintained.
 - Message hooks are released when the window closes, `"Warming"` is spelled
   `"Warning"`, and a misspelled variable was fixed.
 
+### Gesture Recorder — usability
+
+- **Drawing uses the right mouse button.** A Text control's `Click` event only
+  arrives once the button is released, which is too late to record anything —
+  the likely reason drawing never felt reliable. Replaced with a `$RButton`
+  hotkey scoped by `HotIfWinActive`, a built-in criterion the hook can evaluate
+  without asking the script's main thread on every click. Outside the board the
+  right button behaves normally.
+- **The live track is drawn in `0xFE4F7F`** instead of the library default. The
+  default is a pale grey that is nearly invisible on the recorder's white board.
+- **Export reworked.** *Generate Code* now offers a complete script or the
+  gesture definitions on their own, and can copy to the clipboard, save as a new
+  file, or insert into an existing script between generated markers. The insert
+  takes a timestamped backup, keeps the target's line endings and byte order
+  mark, and writes through a temporary file. Inserting the complete script into
+  a script that already has `$RButton::` is caught and offered as the
+  definitions-only block instead, since AHK rejects duplicate hotkeys.
+
 ### Tests
 
 - `tests/selftest.ahk` — validation, gesture round trip, DTW distances for

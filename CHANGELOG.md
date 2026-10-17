@@ -161,6 +161,19 @@ appears to be unmaintained.
   a script that already has `$RButton::` is caught and offered as the
   definitions-only block instead, since AHK rejects duplicate hotkeys.
 
+### Demo
+
+- `demo.ahk` rewritten around the upstream gesture set, which is kept. It now
+  declares `#Requires`, spells out the tunables that are worth knowing, and
+  explains why the Notepad scoping uses `HotIfWinActive` rather than `#HotIf`.
+- **The instructions no longer go into Notepad's edit control.** Upstream wrote
+  them with `ControlSetText` against a guessed control class, which the Windows
+  11 Notepad changed — so the demo started silently without any instructions.
+  They are in a small window of its own now. The demo also gives up with a
+  message instead of waiting forever if Notepad does not appear.
+- Gesture names are plain ASCII. `←` and `→` depend on the file being read as
+  UTF-8, which is not guaranteed without a byte order mark.
+
 ### Tests
 
 - `tests/selftest.ahk` — validation, gesture round trip, DTW distances for

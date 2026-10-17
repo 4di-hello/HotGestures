@@ -1,4 +1,4 @@
-#Include <HotGestures\HotGestures>
+#Include HotGestures.ahk
 
 leftSlide := HotGestures.Gesture("←:-1,0")
 rightSlide := HotGestures.Gesture("→:1,0")

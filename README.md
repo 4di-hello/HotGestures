@@ -262,9 +262,10 @@ dependent. Those still need a human and a mouse.
 - `MaxVectors` at 1500 is far above anything I draw. If you hit it legitimately,
   I would like to know what you were drawing.
 - Tested on exactly one setup: Windows 11, three monitors, 2× 4K at 150 % plus a
-  FullHD laptop panel at 100 %, with the primary monitor on the right and
-  negative X coordinates to the left. Reports from other arrangements — vertical
-  stacks, mixed refresh rates, more than three monitors — would be useful.
+  FullHD laptop panel at 100 %, side by side with the primary monitor in the
+  middle, so the monitor to its left has negative X coordinates. All three are
+  at the same top edge. Reports from other arrangements — vertical stacks,
+  mixed refresh rates, more than three monitors — would be useful.
 - AutoHotkey **v2.1-alpha.16+ defaults to per-monitor DPI awareness**. The
   workarounds here should become unnecessary there, but I have not tested
   against v2.1 yet. If you run v2.1, I would like to hear what happens.
